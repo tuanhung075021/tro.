@@ -572,7 +572,7 @@ if not SQLMODEL_INSTALLED:
 
 try:
     import fastapi
-    from fastapi import APIRouter, Depends, FastAPI, Header, HTTPException, Query, Request, Response, status
+    from fastapi import APIRouter, Depends, FastAPI, Header, HTTPException, Query, Request, Response, status, WebSocket, WebSocketDisconnect
     from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer, OAuth2PasswordBearer
     FASTAPI_INSTALLED = True
     try:
@@ -603,6 +603,23 @@ except ImportError:
     FileResponse = None  # type: ignore
     HTMLResponse = None  # type: ignore
     StaticFiles = None  # type: ignore
+
+    class WebSocket:  # type: ignore[no-redef]
+        """Lightweight WebSocket mock for compatibility."""
+        async def accept(self) -> None:
+            pass
+        async def send_text(self, data: str) -> None:
+            pass
+        async def send_json(self, data: Any) -> None:
+            pass
+        async def receive_text(self) -> str:
+            return ""
+        async def close(self, code: int = 1000) -> None:
+            pass
+
+    class WebSocketDisconnect(Exception):  # type: ignore[no-redef]
+        def __init__(self, code: int = 1000):
+            self.code = code
 
     class Request:  # type: ignore[no-redef]
         """Lightweight Request mock for compatibility."""
@@ -845,6 +862,12 @@ if not FASTAPI_INSTALLED:
                 return func
             return decorator
 
+        def websocket(self, path: str, **kwargs: Any):
+            def decorator(func: Callable[..., Any]):
+                self.add_api_route(path, func, methods=["WEBSOCKET"], **kwargs)
+                return func
+            return decorator
+
     class FastAPI:
         """Lightweight FastAPI application registering routes."""
         def __init__(self, title: str = "tro. API", lifespan: Optional[Any] = None, **kwargs: Any):
@@ -899,6 +922,12 @@ if not FASTAPI_INSTALLED:
         def delete(self, path: str, response_model: Optional[Any] = None, status_code: int = 200, **kwargs: Any):
             def decorator(func: Callable[..., Any]):
                 self.routes.append(Route(path, func, ["DELETE"], response_model=response_model, status_code=status_code, **kwargs))
+                return func
+            return decorator
+
+        def websocket(self, path: str, **kwargs: Any):
+            def decorator(func: Callable[..., Any]):
+                self.routes.append(Route(path, func, ["WEBSOCKET"], **kwargs))
                 return func
             return decorator
 
@@ -1322,6 +1351,8 @@ if not FASTAPI_INSTALLED:
     fastapi_mod.HTMLResponse = HTMLResponse
     fastapi_mod.FileResponse = FileResponse
     fastapi_mod.StaticFiles = StaticFiles
+    fastapi_mod.WebSocket = WebSocket
+    fastapi_mod.WebSocketDisconnect = WebSocketDisconnect
     sys.modules["fastapi"] = fastapi_mod
 
     middleware_mod = types.ModuleType("fastapi.middleware")
@@ -1369,6 +1400,8 @@ __all__ = [
     "Session",
     "StaticFiles",
     "TestClient",
+    "WebSocket",
+    "WebSocketDisconnect",
     "create_engine",
     "select",
     "col",

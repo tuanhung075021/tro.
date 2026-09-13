@@ -6,6 +6,8 @@
 import React, { useState, useEffect, useCallback, useMemo } from 'react';
 import { properties as propApi, rooms as roomApi, invoices as invoiceApi } from '../services/api';
 import { useToast } from '../context/ToastContext';
+import { useTariff } from '../context/TariffContext';
+import { useRealtimeEvent } from '../context/WebSocketContext';
 import {
   Building2,
   Plus,
@@ -31,10 +33,24 @@ import {
   Send,
   Printer,
   Bookmark,
+  Trash2,
+  Lock,
+  Clock,
+  Edit3,
+  X,
+  Loader2,
 } from 'lucide-react';
 
 export default function LandlordDashboard({ onViewPublicInvoice }) {
   const { toast } = useToast();
+  const {
+    tariffConfig,
+    maxTierPrice,
+    fallbackTierNumber,
+    fallbackTierPrice,
+    complianceDecree,
+    penaltyText,
+  } = useTariff();
   const [propertiesList, setPropertiesList] = useState([]);
   const [selectedProperty, setSelectedProperty] = useState(null);
   const [roomsList, setRoomsList] = useState([]);
@@ -57,6 +73,36 @@ export default function LandlordDashboard({ onViewPublicInvoice }) {
   const [historyModalRoom, setHistoryModalRoom] = useState(null);
   const [roomInvoicesList, setRoomInvoicesList] = useState([]);
   const [loadingHistory, setLoadingHistory] = useState(false);
+
+  // Property Deletion state
+  const [showDeletePropModal, setShowDeletePropModal] = useState(false);
+  const [deletePropPassword, setDeletePropPassword] = useState('');
+  const [deletePropLoading, setDeletePropLoading] = useState(false);
+  const [deletePropError, setDeletePropError] = useState(null);
+
+  // Room Deletion state
+  const [deleteRoomModal, setDeleteRoomModal] = useState(null);
+  const [deleteRoomPassword, setDeleteRoomPassword] = useState('');
+  const [deleteRoomLoading, setDeleteRoomLoading] = useState(false);
+  const [deleteRoomError, setDeleteRoomError] = useState(null);
+
+  // Occupancy Change & Dual-Approval state
+  const [occupancyRequestsMap, setOccupancyRequestsMap] = useState({});
+  const [occupancyModalRoom, setOccupancyModalRoom] = useState(null);
+  const [occupancyForm, setOccupancyForm] = useState({
+    new_people_count: 1,
+    effective_date: new Date().toISOString().split('T')[0],
+    note: '',
+    password: '',
+  });
+  const [occupancySubmitting, setOccupancySubmitting] = useState(false);
+  const [occupancyError, setOccupancyError] = useState(null);
+
+  // Rejection modal state
+  const [rejectModalReq, setRejectModalReq] = useState(null);
+  const [rejectReason, setRejectReason] = useState('');
+  const [rejecting, setRejecting] = useState(false);
+  const [highlightRoomId, setHighlightRoomId] = useState(null);
 
   // Forms
   const [propForm, setPropForm] = useState({ name: '', address: '' });
@@ -122,7 +168,26 @@ export default function LandlordDashboard({ onViewPublicInvoice }) {
       setLoadingRooms(true);
       try {
         const data = await propApi.getRooms(propertyId);
-        setRoomsList(data || []);
+        const rooms = data || [];
+        setRoomsList(rooms);
+
+        // Fetch occupancy change requests for each room in parallel
+        if (rooms.length > 0) {
+          try {
+            const reqArrays = await Promise.all(
+              rooms.map((r) => roomApi.getOccupancyRequests(r.id).catch(() => []))
+            );
+            const map = {};
+            rooms.forEach((r, idx) => {
+              map[r.id] = reqArrays[idx] || [];
+            });
+            setOccupancyRequestsMap(map);
+          } catch {
+            // ignore
+          }
+        } else {
+          setOccupancyRequestsMap({});
+        }
       } catch (err) {
         toast.error(err.message || 'Không thể tải danh sách phòng');
       } finally {
@@ -137,6 +202,227 @@ export default function LandlordDashboard({ onViewPublicInvoice }) {
       fetchRooms(selectedProperty.id);
     }
   }, [selectedProperty, fetchRooms]);
+
+  // Focus and scroll to room when clicking on notification
+  useEffect(() => {
+    const handleFocusRoom = async (e) => {
+      const { roomId } = e.detail || {};
+      if (!roomId) return;
+
+      const found = roomsList.some((r) => r.id === roomId);
+      if (found) {
+        setHighlightRoomId(roomId);
+        setTimeout(() => {
+          const el = document.getElementById(`room-card-${roomId}`);
+          if (el) el.scrollIntoView({ behavior: 'smooth', block: 'center' });
+        }, 150);
+        setTimeout(() => setHighlightRoomId(null), 4000);
+        return;
+      }
+
+      for (const p of propertiesList) {
+        if (p.id === selectedProperty?.id) continue;
+        try {
+          const rList = await propApi.getRooms(p.id);
+          if (rList.some((r) => r.id === roomId)) {
+            setSelectedProperty(p);
+            setHighlightRoomId(roomId);
+            setTimeout(() => {
+              const el = document.getElementById(`room-card-${roomId}`);
+              if (el) el.scrollIntoView({ behavior: 'smooth', block: 'center' });
+            }, 350);
+            setTimeout(() => setHighlightRoomId(null), 4000);
+            break;
+          }
+        } catch {
+          // ignore
+        }
+      }
+    };
+
+    window.addEventListener('tro:focus_room', handleFocusRoom);
+    return () => window.removeEventListener('tro:focus_room', handleFocusRoom);
+  }, [roomsList, propertiesList, selectedProperty]);
+
+  // Realtime WebSocket listeners
+  useRealtimeEvent('TENANT_JOINED', (data) => {
+    toast.info(`Khách thuê ${data?.tenant_name || ''} vừa nhận phòng ${data?.room_number || ''}!`);
+    if (selectedProperty?.id) {
+      fetchRooms(selectedProperty.id);
+    }
+  });
+
+  useRealtimeEvent('ROOM_UPDATED', () => {
+    if (selectedProperty?.id) {
+      fetchRooms(selectedProperty.id);
+    }
+  });
+
+  useRealtimeEvent('INVOICE_PAID', () => {
+    toast.success('Có hóa đơn vừa được thanh toán!');
+    if (selectedProperty?.id) {
+      fetchRooms(selectedProperty.id);
+    }
+  });
+
+  useRealtimeEvent('QUOTA_REQUEST_CREATED', (data) => {
+    toast.info(`Phòng ${data?.room_number || ''}: Có đề xuất đổi số người định mức!`);
+    if (selectedProperty?.id) {
+      fetchRooms(selectedProperty.id);
+    }
+  });
+
+  useRealtimeEvent('QUOTA_REQUEST_APPROVED', (data) => {
+    toast.success(`Đề xuất đổi số người cho Phòng ${data?.room_number || ''} đã được duyệt!`);
+    if (selectedProperty?.id) {
+      fetchRooms(selectedProperty.id);
+    }
+  });
+
+  useRealtimeEvent('QUOTA_REQUEST_REJECTED', (data) => {
+    toast.warning(`Đề xuất đổi số người cho Phòng ${data?.room_number || ''} đã bị từ chối.`);
+    if (selectedProperty?.id) {
+      fetchRooms(selectedProperty.id);
+    }
+  });
+
+  useRealtimeEvent('ROOM_DELETED', () => {
+    if (selectedProperty?.id) {
+      fetchRooms(selectedProperty.id);
+    }
+  });
+
+  useRealtimeEvent('PROPERTY_DELETED', () => {
+    fetchProperties();
+  });
+
+  // Handlers for Deletion & Occupancy Change
+  const handleOpenDeletePropModal = () => {
+    if (!selectedProperty) return;
+    const occupied = roomsList.filter((r) => r.status === 'occupied' || r.status === 'active' || r.tenant_id != null);
+    if (occupied.length > 0) {
+      toast.warning(`Khu trọ còn ${occupied.length} phòng đang có khách (${occupied.map(r => r.room_number).join(', ')}). Vui lòng trả phòng cho tất cả khách trước khi xóa khu trọ.`);
+      return;
+    }
+    setDeletePropPassword('');
+    setDeletePropError(null);
+    setShowDeletePropModal(true);
+  };
+
+  const handleConfirmDeleteProp = async (e) => {
+    e.preventDefault();
+    if (!selectedProperty || !deletePropPassword) {
+      setDeletePropError('Vui lòng nhập mật khẩu chủ trọ để xác thực.');
+      return;
+    }
+    setDeletePropLoading(true);
+    setDeletePropError(null);
+    try {
+      await propApi.delete(selectedProperty.id, deletePropPassword);
+      toast.success(`Đã xóa khu trọ "${selectedProperty.name}" thành công!`);
+      setShowDeletePropModal(false);
+      const remainingProps = propertiesList.filter((p) => p.id !== selectedProperty.id);
+      setPropertiesList(remainingProps);
+      setSelectedProperty(remainingProps[0] || null);
+    } catch (err) {
+      setDeletePropError(err.message || 'Không thể xóa khu trọ. Vui lòng kiểm tra lại mật khẩu hoặc đảm bảo các phòng đều trống.');
+    } finally {
+      setDeletePropLoading(false);
+    }
+  };
+
+  const handleOpenDeleteRoomModal = (room) => {
+    const isOccupied = room.status === 'occupied' || room.status === 'active' || room.tenant_id != null;
+    if (isOccupied) {
+      toast.warning(`Phòng ${room.room_number} đang có khách thuê. Vui lòng bấm "Trả phòng" trước khi xóa.`);
+      return;
+    }
+    setDeleteRoomModal(room);
+    setDeleteRoomPassword('');
+    setDeleteRoomError(null);
+  };
+
+  const handleConfirmDeleteRoom = async (e) => {
+    e.preventDefault();
+    if (!deleteRoomModal || !deleteRoomPassword) {
+      setDeleteRoomError('Vui lòng nhập mật khẩu chủ trọ để xác thực.');
+      return;
+    }
+    setDeleteRoomLoading(true);
+    setDeleteRoomError(null);
+    try {
+      await roomApi.delete(deleteRoomModal.id, deleteRoomPassword);
+      toast.success(`Đã xóa Phòng ${deleteRoomModal.room_number} thành công!`);
+      setRoomsList((prev) => prev.filter((r) => r.id !== deleteRoomModal.id));
+      setDeleteRoomModal(null);
+    } catch (err) {
+      setDeleteRoomError(err.message || 'Không thể xóa phòng. Vui lòng kiểm tra lại mật khẩu.');
+    } finally {
+      setDeleteRoomLoading(false);
+    }
+  };
+
+  const handleOpenOccupancyModal = (room) => {
+    setOccupancyModalRoom(room);
+    setOccupancyForm({
+      new_people_count: room.current_people_count || 1,
+      effective_date: new Date().toISOString().split('T')[0],
+      note: '',
+      password: '',
+    });
+    setOccupancyError(null);
+  };
+
+  const handleSubmitOccupancyProposal = async (e) => {
+    e.preventDefault();
+    if (!occupancyModalRoom || !occupancyForm.password) {
+      setOccupancyError('Vui lòng nhập mật khẩu chủ trọ để xác thực đề xuất.');
+      return;
+    }
+    setOccupancySubmitting(true);
+    setOccupancyError(null);
+    try {
+      await roomApi.requestOccupancyChange(occupancyModalRoom.id, {
+        new_people_count: parseInt(occupancyForm.new_people_count, 10),
+        effective_date: occupancyForm.effective_date,
+        note: occupancyForm.note || null,
+        password: occupancyForm.password,
+      });
+      toast.success(`Đã gửi đề xuất đổi số người cho Phòng ${occupancyModalRoom.room_number}! Chờ khách thuê xác nhận kép.`);
+      setOccupancyModalRoom(null);
+      if (selectedProperty?.id) fetchRooms(selectedProperty.id);
+    } catch (err) {
+      setOccupancyError(err.message || 'Không thể tạo đề xuất. Vui lòng kiểm tra lại mật khẩu.');
+    } finally {
+      setOccupancySubmitting(false);
+    }
+  };
+
+  const handleLandlordApprove = async (requestId, roomNumber) => {
+    try {
+      await roomApi.approveOccupancyRequest(requestId);
+      toast.success(`Đã phê duyệt số người mới cho Phòng ${roomNumber}!`);
+      if (selectedProperty?.id) fetchRooms(selectedProperty.id);
+    } catch (err) {
+      toast.error(err.message || 'Không thể phê duyệt yêu cầu.');
+    }
+  };
+
+  const handleLandlordReject = async () => {
+    if (!rejectModalReq) return;
+    setRejecting(true);
+    try {
+      await roomApi.rejectOccupancyRequest(rejectModalReq.id, rejectReason);
+      toast.info('Đã từ chối yêu cầu đổi số người.');
+      setRejectModalReq(null);
+      setRejectReason('');
+      if (selectedProperty?.id) fetchRooms(selectedProperty.id);
+    } catch (err) {
+      toast.error(err.message || 'Không thể từ chối yêu cầu.');
+    } finally {
+      setRejecting(false);
+    }
+  };
 
   // Handlers for Property & Rooms
   const handleCreateProperty = async (e) => {
@@ -507,46 +793,55 @@ export default function LandlordDashboard({ onViewPublicInvoice }) {
 
       {/* Selected Property Details & Rooms */}
       {selectedProperty && (
-        <div className="bg-white rounded-3xl shadow-sm border border-slate-200/80 p-6 sm:p-8 space-y-6">
-          <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4 pb-6 border-b border-slate-100">
+        <div className="bg-white rounded-2xl sm:rounded-3xl shadow-sm border border-slate-200/80 p-3.5 sm:p-8 space-y-4 sm:space-y-6">
+          <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 sm:gap-4 pb-4 sm:pb-6 border-b border-slate-100">
             <div>
-              <div className="flex items-center gap-3">
-                <h3 className="text-xl font-black text-slate-900">{selectedProperty.name}</h3>
-                <span className="px-2.5 py-0.5 text-xs font-semibold rounded-full bg-slate-100 text-slate-700">
+              <div className="flex items-center gap-2 sm:gap-3 flex-wrap">
+                <h3 className="text-lg sm:text-xl font-black text-slate-900">{selectedProperty.name}</h3>
+                <span className="px-2 py-0.5 text-xs font-semibold rounded-full bg-slate-100 text-slate-700">
                   {roomsList.length} phòng
                 </span>
                 {/* Property Tariff Badge */}
                 {selectedProperty.tariff_type === 'custom' ? (
-                  <span className="px-2.5 py-0.5 text-xs font-bold rounded-full bg-blue-100 text-blue-800 border border-blue-200">
+                  <span className="px-2 py-0.5 text-xs font-bold rounded-full bg-blue-100 text-blue-800 border border-blue-200">
                     Đơn giá riêng ({selectedProperty.custom_elec_rate?.toLocaleString('vi-VN')} đ/kWh)
                   </span>
                 ) : (
-                  <span className="px-2.5 py-0.5 text-xs font-bold rounded-full bg-emerald-100 text-emerald-800 border border-emerald-200">
-                    Biểu giá Nhà nước (Chuẩn)
+                  <span className="px-2 py-0.5 text-xs font-bold rounded-full bg-emerald-100 text-emerald-800 border border-emerald-200" title={tariffConfig?.tariff_version || 'QD-1279-2023'}>
+                    Biểu giá Nhà nước{tariffConfig?.tariff_version ? ` · ${tariffConfig.tariff_version}` : ''}
                   </span>
                 )}
               </div>
-              <p className="text-sm text-slate-500 mt-1">
+              <p className="text-xs sm:text-sm text-slate-500 mt-1">
                 {selectedProperty.address || 'Chưa cập nhật địa chỉ khu trọ'}
               </p>
             </div>
 
-            <div className="flex flex-wrap items-center gap-2">
+            <div className="grid grid-cols-3 sm:flex sm:flex-wrap items-center gap-1.5 sm:gap-2">
               <button
                 onClick={handleOpenTariffConfig}
-                className="min-h-[44px] flex items-center gap-1.5 px-3.5 py-2.5 bg-slate-100 hover:bg-slate-200 text-slate-700 text-xs font-bold rounded-xl transition-all"
+                className="min-h-[38px] sm:min-h-[44px] flex items-center justify-center gap-1 px-2 sm:px-3.5 py-2 bg-slate-100 hover:bg-slate-200 text-slate-700 text-xs font-bold rounded-xl transition-all"
                 title="Cấu hình biểu giá áp dụng cho khu trọ này"
               >
-                <SlidersHorizontal className="w-4 h-4 text-primary-600" />
-                <span>Cấu hình biểu giá</span>
+                <SlidersHorizontal className="w-3.5 h-3.5 text-primary-600 flex-shrink-0" />
+                <span className="truncate">Biểu giá</span>
               </button>
 
               <button
                 onClick={() => setShowAddRoomModal(true)}
-                className="min-h-[44px] flex items-center gap-1.5 px-4 py-2.5 bg-slate-900 hover:bg-slate-800 text-white text-xs font-bold rounded-xl transition-all shadow-sm"
+                className="min-h-[38px] sm:min-h-[44px] flex items-center justify-center gap-1 px-2 sm:px-4 py-2 bg-slate-900 hover:bg-slate-800 text-white text-xs font-bold rounded-xl transition-all shadow-sm"
               >
-                <Plus className="w-4 h-4" />
-                <span>Thêm phòng trọ</span>
+                <Plus className="w-3.5 h-3.5 flex-shrink-0" />
+                <span className="truncate">Thêm phòng</span>
+              </button>
+
+              <button
+                onClick={handleOpenDeletePropModal}
+                className="min-h-[38px] sm:min-h-[44px] flex items-center justify-center gap-1 px-2 sm:px-3.5 py-2 bg-red-50 hover:bg-red-100 text-red-600 border border-red-200 text-xs font-bold rounded-xl transition-all"
+                title="Xóa khu trọ này (yêu cầu tất cả các phòng phải trống)"
+              >
+                <Trash2 className="w-3.5 h-3.5 flex-shrink-0" />
+                <span className="truncate">Xóa khu</span>
               </button>
             </div>
           </div>
@@ -591,7 +886,12 @@ export default function LandlordDashboard({ onViewPublicInvoice }) {
                 return (
                   <div
                     key={room.id}
-                    className={`p-5 rounded-2xl border transition-all flex flex-col justify-between space-y-4 ${
+                    id={`room-card-${room.id}`}
+                    className={`p-3.5 sm:p-5 rounded-2xl border transition-all flex flex-col justify-between space-y-3 sm:space-y-4 ${
+                      highlightRoomId === room.id
+                        ? 'ring-4 ring-primary-500 ring-offset-2 scale-[1.01] shadow-lg'
+                        : ''
+                    } ${
                       isOccupied
                         ? 'border-emerald-300/90 bg-gradient-to-b from-emerald-50/40 via-white to-white shadow-xs hover:border-emerald-400 hover:shadow-md'
                         : 'border-slate-200/90 bg-white hover:border-slate-300 hover:shadow-sm'
@@ -624,8 +924,74 @@ export default function LandlordDashboard({ onViewPublicInvoice }) {
                             <Users className="w-3.5 h-3.5" />
                             <span>Định mức:</span>
                           </span>
-                          <span className="font-bold text-slate-800">{room.current_people_count} người</span>
+                          <div className="flex items-center gap-2">
+                            <span className="font-bold text-slate-800">{room.current_people_count} người</span>
+                            <button
+                              onClick={() => handleOpenOccupancyModal(room)}
+                              className="text-[11px] font-semibold text-primary-600 hover:text-primary-700 hover:bg-primary-50 px-2 py-1 rounded-lg border border-primary-200 inline-flex items-center gap-1 transition-all"
+                              title="Đề xuất thay đổi số người định mức (cần khách duyệt kép)"
+                            >
+                              <Edit3 className="w-3 h-3" />
+                              <span>Đổi số người</span>
+                            </button>
+                          </div>
                         </div>
+
+                        {/* Dual-Approval Pending Request Block for Room */}
+                        {(() => {
+                          const roomReqs = occupancyRequestsMap[room.id] || [];
+                          const pendingReq = roomReqs.find((r) => r.status === 'pending');
+                          if (!pendingReq) return null;
+
+                          if (pendingReq.requested_by_role === 'tenant') {
+                            return (
+                              <div className="p-2.5 rounded-xl bg-amber-50 border border-amber-200 space-y-2 text-xs">
+                                <div className="flex items-start gap-1.5 text-amber-900">
+                                  <Clock className="w-4 h-4 text-amber-600 flex-shrink-0 mt-0.5" />
+                                  <div>
+                                    <p className="font-bold">Khách thuê yêu cầu đổi số người:</p>
+                                    <p className="text-amber-800">
+                                      Từ {pendingReq.old_people_count} &rarr; <strong>{pendingReq.new_people_count} người</strong> (áp dụng từ {pendingReq.effective_date})
+                                    </p>
+                                    {pendingReq.note && (
+                                      <p className="text-[11px] text-slate-500 italic mt-0.5">"{pendingReq.note}"</p>
+                                    )}
+                                  </div>
+                                </div>
+                                <div className="flex items-center gap-2 pt-1 border-t border-amber-200/60 justify-end">
+                                  <button
+                                    onClick={() => {
+                                      setRejectModalReq(pendingReq);
+                                      setRejectReason('');
+                                    }}
+                                    className="min-h-[32px] px-2.5 py-1 text-xs font-semibold text-slate-600 hover:text-slate-900 bg-white border border-slate-200 rounded-lg transition-colors"
+                                  >
+                                    Từ chối
+                                  </button>
+                                  <button
+                                    onClick={() => handleLandlordApprove(pendingReq.id, room.room_number)}
+                                    className="min-h-[32px] px-3 py-1 text-xs font-bold text-white bg-emerald-600 hover:bg-emerald-700 rounded-lg shadow-xs transition-colors flex items-center gap-1"
+                                  >
+                                    <Check className="w-3.5 h-3.5" />
+                                    <span>Chấp thuận</span>
+                                  </button>
+                                </div>
+                              </div>
+                            );
+                          }
+
+                          return (
+                            <div className="p-2.5 rounded-xl bg-blue-50 border border-blue-200 text-xs flex items-center justify-between gap-2">
+                              <div className="flex items-center gap-1.5 text-blue-900">
+                                <Clock className="w-4 h-4 text-blue-600 flex-shrink-0" />
+                                <span>Đề xuất: <strong>{pendingReq.new_people_count} người</strong> (chờ khách duyệt)</span>
+                              </div>
+                              <span className="px-2 py-0.5 text-[10px] font-bold rounded-full bg-blue-200/80 text-blue-800">
+                                Chờ duyệt
+                              </span>
+                            </div>
+                          );
+                        })()}
 
                         {/* Occupied room: display tenant details */}
                         {isOccupied ? (
@@ -670,32 +1036,32 @@ export default function LandlordDashboard({ onViewPublicInvoice }) {
                     </div>
 
                     {/* Actions */}
-                    <div className="pt-3 border-t border-slate-100 space-y-2.5">
-                      <div className="flex flex-col sm:flex-row items-stretch sm:items-center gap-2">
+                    <div className="pt-3 border-t border-slate-100 space-y-2">
+                      <div className="flex items-center gap-2">
                         <button
                           onClick={() => handleOpenCalcModal(room)}
-                          className="flex-1 min-h-[44px] flex items-center justify-center gap-2 px-3.5 py-2.5 bg-primary-600 hover:bg-primary-700 text-white font-semibold text-xs rounded-xl shadow-sm transition-all"
+                          className="flex-1 min-h-[38px] sm:min-h-[44px] flex items-center justify-center gap-1.5 px-3 py-2 bg-primary-600 hover:bg-primary-700 text-white font-semibold text-xs rounded-xl shadow-sm transition-all"
                         >
-                          <Calculator className="w-4 h-4" />
+                          <Calculator className="w-3.5 h-3.5" />
                           <span>Tính hóa đơn</span>
                         </button>
 
                         <button
                           onClick={() => handleOpenHistoryModal(room)}
                           title="Xem lịch sử hóa đơn phòng này"
-                          className="min-h-[44px] px-3.5 py-2.5 bg-slate-100 hover:bg-slate-200 text-slate-700 rounded-xl text-xs font-semibold transition-colors flex items-center justify-center gap-1.5"
+                          className="min-h-[38px] sm:min-h-[44px] px-3 py-2 bg-slate-100 hover:bg-slate-200 text-slate-700 rounded-xl text-xs font-semibold transition-colors flex items-center justify-center gap-1"
                         >
-                          <FileText className="w-4 h-4 text-slate-500" />
+                          <FileText className="w-3.5 h-3.5 text-slate-500" />
                           <span>Lịch sử</span>
                         </button>
                       </div>
 
-                      <div className="flex items-center justify-between sm:justify-end pt-0.5">
+                      <div className="flex items-center justify-between pt-0.5">
                         {isOccupied ? (
                           <button
                             onClick={() => handleRemoveTenant(room.id, room.room_number)}
                             title="Trả phòng & Đổi mã mời mới"
-                            className="min-h-[44px] px-2.5 text-xs text-red-600 hover:text-red-700 hover:bg-red-50 rounded-lg flex items-center gap-1.5 font-medium transition-colors"
+                            className="min-h-[36px] px-2 text-xs text-amber-700 hover:text-amber-800 hover:bg-amber-50 rounded-lg flex items-center gap-1 font-medium transition-colors"
                           >
                             <UserX className="w-3.5 h-3.5" />
                             <span>Trả phòng</span>
@@ -707,12 +1073,21 @@ export default function LandlordDashboard({ onViewPublicInvoice }) {
                               setAssignInput('');
                               setAssignError(null);
                             }}
-                            className="min-h-[44px] px-2.5 text-xs text-primary-600 hover:text-primary-700 hover:bg-primary-50 rounded-lg flex items-center gap-1.5 font-semibold transition-colors"
+                            className="min-h-[36px] px-2 text-xs text-primary-600 hover:text-primary-700 hover:bg-primary-50 rounded-lg flex items-center gap-1 font-semibold transition-colors"
                           >
                             <UserPlus className="w-3.5 h-3.5" />
-                            <span>Gán người thuê</span>
+                            <span>Gán người</span>
                           </button>
                         )}
+
+                        <button
+                          onClick={() => handleOpenDeleteRoomModal(room)}
+                          title="Xóa phòng này khỏi khu trọ"
+                          className="min-h-[36px] px-2 text-xs text-red-600 hover:text-red-700 hover:bg-red-50 rounded-lg flex items-center gap-1 font-medium transition-colors"
+                        >
+                          <Trash2 className="w-3.5 h-3.5" />
+                          <span>Xóa phòng</span>
+                        </button>
                       </div>
                     </div>
                   </div>
@@ -725,8 +1100,9 @@ export default function LandlordDashboard({ onViewPublicInvoice }) {
 
       {/* MODAL: Cấu hình biểu giá khu trọ (Property Tariff Config) */}
       {showTariffConfigModal && selectedProperty && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-slate-900/60 backdrop-blur-sm">
-          <div className="bg-white rounded-3xl p-6 sm:p-8 max-w-lg w-full shadow-2xl border border-slate-200">
+        <div className="fixed inset-0 z-50 flex items-end sm:items-center justify-center p-0 sm:p-4 bg-slate-900/60 backdrop-blur-sm animate-fade-in">
+          <div className="bg-white w-full sm:max-w-lg rounded-t-3xl sm:rounded-3xl p-4 sm:p-8 max-h-[92vh] sm:max-h-[90vh] overflow-y-auto shadow-2xl border border-slate-200">
+            <div className="w-10 h-1 bg-slate-300 rounded-full mx-auto mb-3 sm:hidden" />
             <h3 className="text-xl font-bold text-slate-900 mb-1">
               Cấu hình biểu giá: {selectedProperty.name}
             </h3>
@@ -757,7 +1133,7 @@ export default function LandlordDashboard({ onViewPublicInvoice }) {
                       Biểu giá chuẩn Nhà nước (Mặc định - Khuyên dùng)
                     </span>
                     <span className="text-xs text-slate-500">
-                      Điện 6 bậc lũy tiến theo QĐ 1279/QĐ-BCT hoặc Bậc 3 cố định theo TT 60/2025/TT-BCT. Hoàn toàn chuẩn luật.
+                      Điện 6 bậc lũy tiến theo biểu giá Nhà nước{tariffConfig?.tariff_version ? ` (${tariffConfig.tariff_version})` : ''}. Hoàn toàn chuẩn luật.
                     </span>
                   </div>
                 </label>
@@ -810,17 +1186,17 @@ export default function LandlordDashboard({ onViewPublicInvoice }) {
                   </div>
 
                   {/* LIVE COMPLIANCE ALERT */}
-                  {Number(tariffConfigForm.custom_elec_rate) > 3460 && (
+                  {Number(tariffConfigForm.custom_elec_rate) > maxTierPrice && (
                     <div className="p-3 bg-red-50 border border-red-300 rounded-xl text-xs text-red-900 space-y-1 animate-fadeIn">
                       <div className="flex items-center gap-1.5 font-bold text-red-700">
                         <ShieldAlert className="w-4 h-4 text-red-600" />
-                        <span>CẢNH BÁO VI PHẠM ĐỊNH MỨC (Nghị định 104/2022/NĐ-CP)</span>
+                        <span>CẢNH BÁO VI PHẠM ĐỊNH MỨC ({complianceDecree})</span>
                       </div>
                       <p className="leading-relaxed">
-                        Đơn giá bạn nhập (<strong>{Number(tariffConfigForm.custom_elec_rate).toLocaleString('vi-VN')} đ/kWh</strong>) cao hơn mức giá trần cao nhất quy định của Nhà nước (3.460 đ/kWh chưa VAT).
+                        Đơn giá bạn nhập (<strong>{Number(tariffConfigForm.custom_elec_rate).toLocaleString('vi-VN')} đ/kWh</strong>) cao hơn mức giá trần quy định hiện hành ({maxTierPrice.toLocaleString('vi-VN')} đ/kWh chưa VAT).
                       </p>
                       <p className="text-[11px] text-red-700">
-                        Chênh lệch thu lố dự kiến: <strong>+{(Number(tariffConfigForm.custom_elec_rate) - 3460).toLocaleString('vi-VN')} đ/kWh</strong>. Hành vi thu tiền điện cao hơn quy định có thể bị phạt tiền 20 - 30 triệu đồng!
+                        Chênh lệch dự kiến: <strong>+{(Number(tariffConfigForm.custom_elec_rate) - maxTierPrice).toLocaleString('vi-VN')} đ/kWh</strong>. Hành vi thu tiền điện cao hơn quy định có thể bị phạt tiền {penaltyText}!
                       </p>
                     </div>
                   )}
@@ -867,8 +1243,9 @@ export default function LandlordDashboard({ onViewPublicInvoice }) {
 
       {/* MODAL: Thêm Khu trọ */}
       {showAddPropModal && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-slate-900/60 backdrop-blur-sm">
-          <div className="bg-white rounded-3xl p-6 sm:p-8 max-w-md w-full shadow-2xl border border-slate-200">
+        <div className="fixed inset-0 z-50 flex items-end sm:items-center justify-center p-0 sm:p-4 bg-slate-900/60 backdrop-blur-sm animate-fade-in">
+          <div className="bg-white w-full sm:max-w-md rounded-t-3xl sm:rounded-3xl p-4 sm:p-8 max-h-[92vh] sm:max-h-[90vh] overflow-y-auto shadow-2xl border border-slate-200">
+            <div className="w-10 h-1 bg-slate-300 rounded-full mx-auto mb-3 sm:hidden" />
             <h3 className="text-xl font-bold text-slate-900 mb-4">Thêm Khu trọ mới</h3>
             <form onSubmit={handleCreateProperty} className="space-y-4">
               <div>
@@ -920,8 +1297,9 @@ export default function LandlordDashboard({ onViewPublicInvoice }) {
 
       {/* MODAL: Thêm Phòng */}
       {showAddRoomModal && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-slate-900/60 backdrop-blur-sm">
-          <div className="bg-white rounded-3xl p-6 sm:p-8 max-w-md w-full shadow-2xl border border-slate-200">
+        <div className="fixed inset-0 z-50 flex items-end sm:items-center justify-center p-0 sm:p-4 bg-slate-900/60 backdrop-blur-sm animate-fade-in">
+          <div className="bg-white w-full sm:max-w-md rounded-t-3xl sm:rounded-3xl p-4 sm:p-8 max-h-[92vh] sm:max-h-[90vh] overflow-y-auto shadow-2xl border border-slate-200">
+            <div className="w-10 h-1 bg-slate-300 rounded-full mx-auto mb-3 sm:hidden" />
             <h3 className="text-xl font-bold text-slate-900 mb-1">
               Thêm phòng cho {selectedProperty?.name}
             </h3>
@@ -983,8 +1361,9 @@ export default function LandlordDashboard({ onViewPublicInvoice }) {
 
       {/* MODAL: Tính Hóa Đơn (Draft vs Publish Flow) */}
       {calcModalRoom && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center sm:p-4 bg-slate-900/60 backdrop-blur-sm overflow-y-auto">
-          <div className="bg-white max-w-full w-full rounded-none sm:rounded-3xl sm:max-w-2xl p-4 sm:p-8 shadow-2xl border border-slate-200 my-0 sm:my-8 max-h-[100vh] sm:max-h-[90vh] overflow-y-auto scrollbar-thin">
+        <div className="fixed inset-0 z-50 flex items-end sm:items-center justify-center p-0 sm:p-4 bg-slate-900/60 backdrop-blur-sm animate-fade-in">
+          <div className="bg-white w-full sm:max-w-2xl rounded-t-3xl sm:rounded-3xl p-4 sm:p-8 max-h-[92vh] sm:max-h-[90vh] overflow-y-auto shadow-2xl border border-slate-200">
+            <div className="w-10 h-1 bg-slate-300 rounded-full mx-auto mb-3 sm:hidden" />
             <div className="flex items-start sm:items-center justify-between pb-4 border-b border-slate-100 mb-6 gap-2">
               <div>
                 <div className="text-xs font-bold text-primary-600 uppercase tracking-wider">
@@ -1042,7 +1421,7 @@ export default function LandlordDashboard({ onViewPublicInvoice }) {
                     className="w-full px-3.5 py-2.5 bg-slate-50 border border-slate-200 rounded-xl text-sm focus:outline-none focus:ring-2 focus:ring-primary-500 min-h-[44px]"
                   >
                     <option value="TIERED">Bậc thang 6 bậc (Luật định)</option>
-                    <option value="TIER3">Đồng giá bậc 3 (2.380 đ/kWh)</option>
+                    <option value="TIER3">Đồng giá bậc {fallbackTierNumber} ({fallbackTierPrice.toLocaleString('vi-VN')} đ/kWh)</option>
                   </select>
                   <p className="text-[11px] text-slate-400 mt-1">Khuyên dùng bậc thang 6 bậc chuẩn</p>
                 </div>
@@ -1151,7 +1530,7 @@ export default function LandlordDashboard({ onViewPublicInvoice }) {
                 <div className="p-3.5 bg-red-50 border-2 border-red-400 rounded-2xl text-xs text-red-900 space-y-1 animate-pulse">
                   <div className="flex items-center gap-2 font-black text-red-700">
                     <ShieldAlert className="w-4 h-4 text-red-600 flex-shrink-0" />
-                    <span>CẢNH BÁO VI PHẠM ĐỊNH MỨC (Nghị định 104/2022/NĐ-CP)</span>
+                    <span>CẢNH BÁO VI PHẠM ĐỊNH MỨC ({complianceDecree})</span>
                   </div>
                   <p className="leading-relaxed">
                     Số tiền bạn nhập thu (<strong>{liveFormCompliance.actualEst.toLocaleString('vi-VN')} đ</strong>) cao hơn mức luật định dự kiến (~{liveFormCompliance.approxStatutoryTotal.toLocaleString('vi-VN')} đ). Chênh lệch thu lố dự kiến: <strong>+{liveFormCompliance.diff.toLocaleString('vi-VN')} đ</strong>!
@@ -1204,7 +1583,7 @@ export default function LandlordDashboard({ onViewPublicInvoice }) {
                       <span>CẢNH BÁO: CHÊNH LỆCH THU LỐ {Number(calcResult.diff_amount).toLocaleString('vi-VN')} VNĐ!</span>
                     </div>
                     <p className="text-xs text-red-800 leading-relaxed">
-                      Tiền thực thu ({Number(calcResult.actual_collected_amount).toLocaleString('vi-VN')} đ) cao hơn quy định pháp luật ({Number(calcResult.total_statutory_amount).toLocaleString('vi-VN')} đ). Vi phạm quy định tại Nghị định 104/2022/NĐ-CP và có nguy cơ bị xử phạt hành chính từ 20-30 triệu đồng.
+                      Tiền thực thu ({Number(calcResult.actual_collected_amount).toLocaleString('vi-VN')} đ) cao hơn quy định pháp luật ({Number(calcResult.total_statutory_amount).toLocaleString('vi-VN')} đ). Vi phạm quy định tại {complianceDecree} và có nguy cơ bị xử phạt hành chính từ {penaltyText}.
                     </p>
                   </div>
                 ) : (
@@ -1315,8 +1694,9 @@ export default function LandlordDashboard({ onViewPublicInvoice }) {
 
       {/* MODAL: Lịch sử hóa đơn phòng */}
       {historyModalRoom && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-slate-900/60 backdrop-blur-sm overflow-y-auto">
-          <div className="bg-white rounded-3xl p-6 sm:p-8 max-w-xl w-full shadow-2xl border border-slate-200 my-8">
+        <div className="fixed inset-0 z-50 flex items-end sm:items-center justify-center p-0 sm:p-4 bg-slate-900/60 backdrop-blur-sm animate-fade-in">
+          <div className="bg-white w-full sm:max-w-xl rounded-t-3xl sm:rounded-3xl p-4 sm:p-8 max-h-[92vh] sm:max-h-[90vh] overflow-y-auto shadow-2xl border border-slate-200">
+            <div className="w-10 h-1 bg-slate-300 rounded-full mx-auto mb-3 sm:hidden" />
             <div className="flex items-center justify-between pb-4 border-b border-slate-100 mb-4">
               <div>
                 <h3 className="text-xl font-black text-slate-900">
@@ -1417,8 +1797,9 @@ export default function LandlordDashboard({ onViewPublicInvoice }) {
 
       {/* MODAL: Gán người thuê */}
       {assignModalRoom && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-slate-900/60 backdrop-blur-sm">
-          <div className="bg-white rounded-3xl p-6 sm:p-8 max-w-md w-full shadow-2xl border border-slate-200">
+        <div className="fixed inset-0 z-50 flex items-end sm:items-center justify-center p-0 sm:p-4 bg-slate-900/60 backdrop-blur-sm animate-fade-in">
+          <div className="bg-white w-full sm:max-w-md rounded-t-3xl sm:rounded-3xl p-4 sm:p-8 max-h-[92vh] sm:max-h-[90vh] overflow-y-auto shadow-2xl border border-slate-200">
+            <div className="w-10 h-1 bg-slate-300 rounded-full mx-auto mb-3 sm:hidden" />
             <h3 className="text-xl font-bold text-slate-900 mb-2">
               Gán khách thuê vào Phòng {assignModalRoom.room_number}
             </h3>
@@ -1462,6 +1843,331 @@ export default function LandlordDashboard({ onViewPublicInvoice }) {
                 </button>
               </div>
             </form>
+          </div>
+        </div>
+      )}
+
+      {/* MODAL: Xóa khu trọ */}
+      {showDeletePropModal && selectedProperty && (
+        <div className="fixed inset-0 z-50 flex items-end sm:items-center justify-center p-0 sm:p-4 bg-slate-900/60 backdrop-blur-sm animate-fade-in">
+          <div className="bg-white w-full sm:max-w-md rounded-t-3xl sm:rounded-3xl p-4 sm:p-8 max-h-[92vh] sm:max-h-[90vh] overflow-y-auto shadow-2xl border border-slate-200">
+            <div className="w-10 h-1 bg-slate-300 rounded-full mx-auto mb-3 sm:hidden" />
+            <div className="flex items-center gap-3 text-red-600 mb-3">
+              <div className="w-10 h-10 rounded-2xl bg-red-100 flex items-center justify-center">
+                <Trash2 className="w-5 h-5" />
+              </div>
+              <div>
+                <h3 className="text-lg font-bold text-slate-900">Xác nhận xóa khu trọ</h3>
+                <p className="text-xs text-slate-500 font-mono">{selectedProperty.name}</p>
+              </div>
+            </div>
+
+            <div className="p-3.5 bg-red-50/80 border border-red-200 rounded-2xl mb-4 text-xs text-red-700 leading-relaxed">
+              <p className="font-semibold mb-1">Cảnh báo bảo mật & an toàn dữ liệu:</p>
+              Hành động này sẽ xóa vĩnh viễn khu trọ cùng các phòng trống và hóa đơn liên quan. Khu trọ chỉ được phép xóa khi <strong>tất cả các phòng đều không có khách thuê</strong>.
+            </div>
+
+            {deletePropError && (
+              <div className="mb-4 p-3 bg-red-50 border border-red-200 rounded-xl text-xs text-red-700">
+                {deletePropError}
+              </div>
+            )}
+
+            <form onSubmit={handleConfirmDeleteProp} className="space-y-4">
+              <div>
+                <label className="block text-xs font-semibold text-slate-700 mb-1.5 uppercase">
+                  Nhập mật khẩu chủ trọ để xác thực
+                </label>
+                <div className="relative">
+                  <Lock className="w-4 h-4 text-slate-400 absolute left-3.5 top-3.5" />
+                  <input
+                    type="password"
+                    required
+                    value={deletePropPassword}
+                    onChange={(e) => setDeletePropPassword(e.target.value)}
+                    placeholder="Mật khẩu tài khoản của bạn"
+                    className="w-full pl-10 pr-3.5 py-2.5 bg-slate-50 border border-slate-200 rounded-xl text-sm focus:outline-none focus:ring-2 focus:ring-red-500 min-h-[44px]"
+                  />
+                </div>
+              </div>
+
+              <div className="flex items-center justify-end gap-3 pt-3 border-t border-slate-100">
+                <button
+                  type="button"
+                  disabled={deletePropLoading}
+                  onClick={() => setShowDeletePropModal(false)}
+                  className="min-h-[44px] px-4 py-2 text-sm text-slate-600 hover:text-slate-800 rounded-xl inline-flex items-center justify-center"
+                >
+                  Hủy
+                </button>
+                <button
+                  type="submit"
+                  disabled={deletePropLoading}
+                  className="min-h-[44px] px-5 py-2.5 bg-red-600 hover:bg-red-700 text-white font-semibold text-sm rounded-xl disabled:opacity-60 shadow-sm flex items-center justify-center gap-1.5"
+                >
+                  {deletePropLoading ? (
+                    <>
+                      <Loader2 className="w-4 h-4 animate-spin" />
+                      <span>Đang xóa...</span>
+                    </>
+                  ) : (
+                    <>
+                      <Trash2 className="w-4 h-4" />
+                      <span>Xác nhận xóa vĩnh viễn</span>
+                    </>
+                  )}
+                </button>
+              </div>
+            </form>
+          </div>
+        </div>
+      )}
+
+      {/* MODAL: Xóa phòng */}
+      {deleteRoomModal && (
+        <div className="fixed inset-0 z-50 flex items-end sm:items-center justify-center p-0 sm:p-4 bg-slate-900/60 backdrop-blur-sm animate-fade-in">
+          <div className="bg-white w-full sm:max-w-md rounded-t-3xl sm:rounded-3xl p-4 sm:p-8 max-h-[92vh] sm:max-h-[90vh] overflow-y-auto shadow-2xl border border-slate-200">
+            <div className="w-10 h-1 bg-slate-300 rounded-full mx-auto mb-3 sm:hidden" />
+            <div className="flex items-center gap-3 text-red-600 mb-3">
+              <div className="w-10 h-10 rounded-2xl bg-red-100 flex items-center justify-center">
+                <Trash2 className="w-5 h-5" />
+              </div>
+              <div>
+                <h3 className="text-lg font-bold text-slate-900">Xóa Phòng {deleteRoomModal.room_number}</h3>
+                <p className="text-xs text-slate-500">Khu trọ: {selectedProperty?.name}</p>
+              </div>
+            </div>
+
+            <div className="p-3.5 bg-red-50/80 border border-red-200 rounded-2xl mb-4 text-xs text-red-700 leading-relaxed">
+              <p className="font-semibold mb-1">Cảnh báo:</p>
+              Hành động này sẽ xóa vĩnh viễn Phòng {deleteRoomModal.room_number} cùng lịch sử hóa đơn. Chỉ thực hiện được khi phòng <strong>ở trạng thái TRỐNG</strong>.
+            </div>
+
+            {deleteRoomError && (
+              <div className="mb-4 p-3 bg-red-50 border border-red-200 rounded-xl text-xs text-red-700">
+                {deleteRoomError}
+              </div>
+            )}
+
+            <form onSubmit={handleConfirmDeleteRoom} className="space-y-4">
+              <div>
+                <label className="block text-xs font-semibold text-slate-700 mb-1.5 uppercase">
+                  Nhập mật khẩu chủ trọ để xác thực
+                </label>
+                <div className="relative">
+                  <Lock className="w-4 h-4 text-slate-400 absolute left-3.5 top-3.5" />
+                  <input
+                    type="password"
+                    required
+                    value={deleteRoomPassword}
+                    onChange={(e) => setDeleteRoomPassword(e.target.value)}
+                    placeholder="Mật khẩu tài khoản của bạn"
+                    className="w-full pl-10 pr-3.5 py-2.5 bg-slate-50 border border-slate-200 rounded-xl text-sm focus:outline-none focus:ring-2 focus:ring-red-500 min-h-[44px]"
+                  />
+                </div>
+              </div>
+
+              <div className="flex items-center justify-end gap-3 pt-3 border-t border-slate-100">
+                <button
+                  type="button"
+                  disabled={deleteRoomLoading}
+                  onClick={() => setDeleteRoomModal(null)}
+                  className="min-h-[44px] px-4 py-2 text-sm text-slate-600 hover:text-slate-800 rounded-xl inline-flex items-center justify-center"
+                >
+                  Hủy
+                </button>
+                <button
+                  type="submit"
+                  disabled={deleteRoomLoading}
+                  className="min-h-[44px] px-5 py-2.5 bg-red-600 hover:bg-red-700 text-white font-semibold text-sm rounded-xl disabled:opacity-60 shadow-sm flex items-center justify-center gap-1.5"
+                >
+                  {deleteRoomLoading ? (
+                    <>
+                      <Loader2 className="w-4 h-4 animate-spin" />
+                      <span>Đang xóa...</span>
+                    </>
+                  ) : (
+                    <>
+                      <Trash2 className="w-4 h-4" />
+                      <span>Xóa phòng</span>
+                    </>
+                  )}
+                </button>
+              </div>
+            </form>
+          </div>
+        </div>
+      )}
+
+      {/* MODAL: Chủ trọ đề xuất đổi số người định mức (Dual-Approval) */}
+      {occupancyModalRoom && (
+        <div className="fixed inset-0 z-50 flex items-end sm:items-center justify-center p-0 sm:p-4 bg-slate-900/60 backdrop-blur-sm animate-fade-in">
+          <div className="bg-white w-full sm:max-w-md rounded-t-3xl sm:rounded-3xl p-4 sm:p-8 max-h-[92vh] sm:max-h-[90vh] overflow-y-auto shadow-2xl border border-slate-200">
+            <div className="w-10 h-1 bg-slate-300 rounded-full mx-auto mb-3 sm:hidden" />
+            <div className="flex items-center gap-3 text-primary-600 mb-3">
+              <div className="w-10 h-10 rounded-2xl bg-primary-100 flex items-center justify-center">
+                <ShieldCheck className="w-5 h-5 text-primary-600" />
+              </div>
+              <div>
+                <h3 className="text-lg font-bold text-slate-900">
+                  Đổi số người: Phòng {occupancyModalRoom.room_number}
+                </h3>
+                <p className="text-xs text-slate-500">Cơ chế xác thực kép an toàn (Dual-Approval)</p>
+              </div>
+            </div>
+
+            <p className="text-xs text-slate-600 mb-4 leading-relaxed">
+              Bạn đang gửi đề xuất thay đổi số người tính định mức. Khách thuê cần đăng nhập để phê duyệt trước khi số người mới chính thức áp dụng.
+            </p>
+
+            {occupancyError && (
+              <div className="mb-4 p-3 bg-red-50 border border-red-200 rounded-xl text-xs text-red-700">
+                {occupancyError}
+              </div>
+            )}
+
+            <form onSubmit={handleSubmitOccupancyProposal} className="space-y-4">
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                <div>
+                  <label className="block text-xs font-semibold text-slate-700 mb-1">
+                    Số người mới *
+                  </label>
+                  <input
+                    type="number"
+                    min="1"
+                    max="20"
+                    required
+                    value={occupancyForm.new_people_count}
+                    onChange={(e) =>
+                      setOccupancyForm((prev) => ({ ...prev, new_people_count: e.target.value }))
+                    }
+                    className="w-full px-3.5 py-2 bg-slate-50 border border-slate-200 rounded-xl text-sm focus:outline-none focus:ring-2 focus:ring-primary-500 min-h-[44px]"
+                  />
+                </div>
+
+                <div>
+                  <label className="block text-xs font-semibold text-slate-700 mb-1">
+                    Ngày áp dụng *
+                  </label>
+                  <input
+                    type="date"
+                    required
+                    value={occupancyForm.effective_date}
+                    onChange={(e) =>
+                      setOccupancyForm((prev) => ({ ...prev, effective_date: e.target.value }))
+                    }
+                    className="w-full px-3 py-2 bg-slate-50 border border-slate-200 rounded-xl text-sm focus:outline-none focus:ring-2 focus:ring-primary-500 min-h-[44px]"
+                  />
+                </div>
+              </div>
+
+              <div>
+                <label className="block text-xs font-semibold text-slate-700 mb-1">
+                  Lý do / Ghi chú cho khách thuê (tùy chọn)
+                </label>
+                <input
+                  type="text"
+                  value={occupancyForm.note}
+                  onChange={(e) => setOccupancyForm((prev) => ({ ...prev, note: e.target.value }))}
+                  placeholder="Ví dụ: Có người chuyển thêm vào phòng từ giữa tháng"
+                  className="w-full px-3.5 py-2.5 bg-slate-50 border border-slate-200 rounded-xl text-sm focus:outline-none focus:ring-2 focus:ring-primary-500 min-h-[44px]"
+                />
+              </div>
+
+              <div>
+                <label className="block text-xs font-semibold text-slate-700 mb-1.5 uppercase">
+                  Mật khẩu chủ trọ để ký đề xuất *
+                </label>
+                <div className="relative">
+                  <Lock className="w-4 h-4 text-slate-400 absolute left-3.5 top-3.5" />
+                  <input
+                    type="password"
+                    required
+                    value={occupancyForm.password}
+                    onChange={(e) =>
+                      setOccupancyForm((prev) => ({ ...prev, password: e.target.value }))
+                    }
+                    placeholder="Nhập mật khẩu tài khoản của bạn"
+                    className="w-full pl-10 pr-3.5 py-2.5 bg-slate-50 border border-slate-200 rounded-xl text-sm focus:outline-none focus:ring-2 focus:ring-primary-500 min-h-[44px]"
+                  />
+                </div>
+              </div>
+
+              <div className="flex items-center justify-end gap-3 pt-3 border-t border-slate-100">
+                <button
+                  type="button"
+                  disabled={occupancySubmitting}
+                  onClick={() => setOccupancyModalRoom(null)}
+                  className="min-h-[44px] px-4 py-2 text-sm text-slate-600 hover:text-slate-800 rounded-xl inline-flex items-center justify-center"
+                >
+                  Hủy
+                </button>
+                <button
+                  type="submit"
+                  disabled={occupancySubmitting}
+                  className="min-h-[44px] px-5 py-2.5 bg-primary-600 hover:bg-primary-700 text-white font-semibold text-sm rounded-xl disabled:opacity-60 shadow-sm flex items-center justify-center gap-1.5"
+                >
+                  {occupancySubmitting ? (
+                    <>
+                      <Loader2 className="w-4 h-4 animate-spin" />
+                      <span>Đang gửi...</span>
+                    </>
+                  ) : (
+                    <>
+                      <Send className="w-4 h-4" />
+                      <span>Gửi đề xuất cho khách</span>
+                    </>
+                  )}
+                </button>
+              </div>
+            </form>
+          </div>
+        </div>
+      )}
+
+      {/* MODAL: Từ chối đề xuất đổi số người */}
+      {rejectModalReq && (
+        <div className="fixed inset-0 z-50 flex items-end sm:items-center justify-center p-0 sm:p-4 bg-slate-900/60 backdrop-blur-sm animate-fade-in">
+          <div className="bg-white w-full sm:max-w-md rounded-t-3xl sm:rounded-3xl p-4 sm:p-8 max-h-[92vh] sm:max-h-[90vh] overflow-y-auto shadow-2xl border border-slate-200">
+            <div className="w-10 h-1 bg-slate-300 rounded-full mx-auto mb-3 sm:hidden" />
+            <h3 className="text-lg font-bold text-slate-900 mb-2">
+              Từ chối yêu cầu đổi số người
+            </h3>
+            <p className="text-xs text-slate-600 mb-4">
+              Nhập lý do từ chối để đối tác nắm rõ nguyên nhân:
+            </p>
+
+            <div className="space-y-4">
+              <textarea
+                rows="3"
+                value={rejectReason}
+                onChange={(e) => setRejectReason(e.target.value)}
+                placeholder="Ví dụ: Chưa cung cấp thông tin người tạm trú mới..."
+                className="w-full px-3.5 py-2.5 bg-slate-50 border border-slate-200 rounded-xl text-sm focus:outline-none focus:ring-2 focus:ring-slate-400"
+              />
+
+              <div className="flex items-center justify-end gap-3 pt-3 border-t border-slate-100">
+                <button
+                  type="button"
+                  disabled={rejecting}
+                  onClick={() => {
+                    setRejectModalReq(null);
+                    setRejectReason('');
+                  }}
+                  className="min-h-[44px] px-4 py-2 text-sm text-slate-600 hover:text-slate-800 rounded-xl inline-flex items-center justify-center"
+                >
+                  Hủy
+                </button>
+                <button
+                  type="button"
+                  disabled={rejecting}
+                  onClick={handleLandlordReject}
+                  className="min-h-[44px] px-5 py-2.5 bg-red-600 hover:bg-red-700 text-white font-semibold text-sm rounded-xl disabled:opacity-60 shadow-sm flex items-center justify-center"
+                >
+                  {rejecting ? 'Đang gửi...' : 'Xác nhận từ chối'}
+                </button>
+              </div>
+            </div>
           </div>
         </div>
       )}

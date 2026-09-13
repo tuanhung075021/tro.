@@ -24,6 +24,9 @@ import {
   KeyRound,
   ChevronDown,
   Trash2,
+  Users,
+  CheckCircle2,
+  XCircle,
 } from 'lucide-react';
 import ChangePasswordModal from './ChangePasswordModal';
 import DeleteAccountModal from './DeleteAccountModal';
@@ -104,7 +107,20 @@ export default function Navbar({
 
     fetchNotifs();
     const timer = setInterval(fetchNotifs, 30000); // 30s poll
-    return () => clearInterval(timer);
+
+    // Immediately re-poll when TariffContext detects a version change
+    const handleTariffChanged = () => fetchNotifs();
+    window.addEventListener('tro:tariff_version_changed', handleTariffChanged);
+
+    // Immediately re-poll on real-time WebSocket events
+    const handleWsEvent = () => fetchNotifs();
+    window.addEventListener('tro:ws_event', handleWsEvent);
+
+    return () => {
+      clearInterval(timer);
+      window.removeEventListener('tro:tariff_version_changed', handleTariffChanged);
+      window.removeEventListener('tro:ws_event', handleWsEvent);
+    };
   }, [isAuthenticated, fetchNotifs]);
 
   // Click outside to close dropdowns
@@ -141,8 +157,20 @@ export default function Navbar({
     );
     setUnreadCount((c) => Math.max(0, c - (n.read ? 0 : 1)));
     setShowNotifDropdown(false);
-    if (n.share_token) {
+
+    if (n.type === 'tariff_updated') {
+      onOpenTariffModal?.();
+    } else if (n.share_token) {
       onSelectInvoice?.(n.share_token);
+    } else if (n.room_id) {
+      if (currentView !== 'dashboard' && currentView !== 'home') {
+        setCurrentView?.('home');
+      }
+      window.dispatchEvent(
+        new CustomEvent('tro:focus_room', {
+          detail: { roomId: n.room_id, requestId: n.request_id, type: n.type },
+        })
+      );
     }
   };
 
@@ -178,6 +206,10 @@ export default function Navbar({
     const base = isRead ? 'bg-white' : '';
     if (type === 'invoice_draft') return `${isRead ? 'bg-white' : 'bg-amber-50/60'}`;
     if (type === 'invoice_published') return `${isRead ? 'bg-white' : 'bg-emerald-50/60'}`;
+    if (type === 'tariff_updated') return `${isRead ? 'bg-white' : 'bg-blue-50/60'}`;
+    if (type === 'occupancy_request_pending') return `${isRead ? 'bg-white' : 'bg-purple-50/70'}`;
+    if (type === 'occupancy_request_approved') return `${isRead ? 'bg-white' : 'bg-emerald-50/70'}`;
+    if (type === 'occupancy_request_rejected') return `${isRead ? 'bg-white' : 'bg-rose-50/70'}`;
     return base;
   };
 
@@ -186,31 +218,40 @@ export default function Navbar({
       return <FileClock className="w-4 h-4 text-amber-500 flex-shrink-0 mt-0.5" />;
     if (type === 'invoice_published')
       return <FileCheck2 className="w-4 h-4 text-emerald-500 flex-shrink-0 mt-0.5" />;
+    if (type === 'tariff_updated')
+      return <Scale className="w-4 h-4 text-blue-500 flex-shrink-0 mt-0.5" />;
+    if (type === 'occupancy_request_pending')
+      return <Users className="w-4 h-4 text-purple-600 flex-shrink-0 mt-0.5" />;
+    if (type === 'occupancy_request_approved')
+      return <CheckCircle2 className="w-4 h-4 text-emerald-600 flex-shrink-0 mt-0.5" />;
+    if (type === 'occupancy_request_rejected')
+      return <XCircle className="w-4 h-4 text-rose-600 flex-shrink-0 mt-0.5" />;
     return <FileText className="w-4 h-4 text-slate-400 flex-shrink-0 mt-0.5" />;
   };
 
   return (
-    <header className="sticky top-0 z-40 bg-white/95 backdrop-blur border-b border-slate-200 shadow-sm">
-      <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8">
-        <div className="flex items-center justify-between h-16">
-          {/* Brand Logo & Slogan */}
-          <div
-            className="flex items-center gap-3 cursor-pointer"
-            onClick={() => {
-              setCurrentView?.('home');
+    <>
+      <header className="sticky top-0 z-40 bg-white/95 backdrop-blur border-b border-slate-200 shadow-sm">
+        <div className="max-w-7xl mx-auto px-3 sm:px-6 lg:px-8">
+          <div className="flex items-center justify-between h-14 sm:h-16">
+            {/* Brand Logo & Slogan */}
+            <div
+              className="flex items-center gap-2 sm:gap-3 cursor-pointer"
+              onClick={() => {
+                setCurrentView?.('home');
               window.history.pushState(null, '', '/');
             }}
           >
-            <div className="flex items-center justify-center w-10 h-10 rounded-xl bg-primary-600 text-white shadow-md shadow-primary-500/20">
-              <Zap className="w-5 h-5 fill-current" />
+            <div className="flex items-center justify-center w-8 h-8 sm:w-10 sm:h-10 rounded-xl bg-primary-600 text-white shadow-md shadow-primary-500/20 flex-shrink-0">
+              <Zap className="w-4 h-4 sm:w-5 sm:h-5 fill-current" />
             </div>
             <div>
-              <div className="flex items-center gap-1.5">
-                <span className="text-2xl font-black tracking-tight text-slate-900">
+              <div className="flex items-center gap-1">
+                <span className="text-xl sm:text-2xl font-black tracking-tight text-slate-900">
                   tro<span className="text-primary-600">.</span>
                 </span>
               </div>
-              <p className="text-[11px] text-slate-500 hidden md:block">
+              <p className="text-[10px] text-slate-500 hidden md:block">
                 Hệ thống Quản lý Lưu trú & Đối chiếu Chi phí Điện Nước Minh bạch
               </p>
             </div>
@@ -267,7 +308,7 @@ export default function Navbar({
 
                   {/* Dropdown panel */}
                   {showNotifDropdown && (
-                    <div className="fixed left-3 right-3 sm:absolute sm:left-auto sm:right-0 mt-2 sm:w-96 bg-white rounded-2xl shadow-2xl border border-slate-200 overflow-hidden z-50 animate-in fade-in zoom-in-95 duration-150 max-h-[85vh] flex flex-col">
+                    <div className="fixed inset-x-2.5 top-16 sm:top-auto sm:inset-x-auto sm:absolute sm:right-0 sm:mt-2 sm:w-96 bg-white rounded-2xl shadow-2xl border border-slate-200 overflow-hidden z-50 animate-in fade-in zoom-in-95 duration-150 max-h-[80vh] flex flex-col">
                       <div className="p-3.5 bg-slate-50 border-b border-slate-200 flex items-center justify-between flex-shrink-0">
                         <div className="flex items-center gap-2">
                           <Bell className="w-4 h-4 text-primary-600" />
@@ -496,23 +537,24 @@ export default function Navbar({
           </div>
         </div>
       </div>
-
-      {/* Change Password Modal */}
-      <ChangePasswordModal
-        isOpen={showChangePasswordModal}
-        onClose={() => setShowChangePasswordModal(false)}
-      />
-
-      {/* Delete Account Modal */}
-      <DeleteAccountModal
-        isOpen={showDeleteAccountModal}
-        onClose={() => setShowDeleteAccountModal(false)}
-        user={user}
-        onAccountDeleted={() => {
-          logout();
-          window.location.href = '/';
-        }}
-      />
     </header>
+
+    {/* Change Password Modal */}
+    <ChangePasswordModal
+      isOpen={showChangePasswordModal}
+      onClose={() => setShowChangePasswordModal(false)}
+    />
+
+    {/* Delete Account Modal */}
+    <DeleteAccountModal
+      isOpen={showDeleteAccountModal}
+      onClose={() => setShowDeleteAccountModal(false)}
+      user={user}
+      onAccountDeleted={() => {
+        logout();
+        window.location.href = '/';
+      }}
+    />
+  </>
   );
 }

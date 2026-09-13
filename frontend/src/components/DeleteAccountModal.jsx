@@ -3,7 +3,8 @@
  * SPDX-License-Identifier: MIT
  */
 
-import React, { useState } from 'react';
+import React, { useState, useEffect } from 'react';
+import { createPortal } from 'react-dom';
 import { useToast } from '../context/ToastContext';
 import { auth as authApi } from '../services/api';
 import { AlertTriangle, Eye, EyeOff, Lock, X, Loader2 } from 'lucide-react';
@@ -14,6 +15,22 @@ export default function DeleteAccountModal({ isOpen, onClose, user, onAccountDel
   const [showPassword, setShowPassword] = useState(false);
   const [submitting, setSubmitting] = useState(false);
   const [errorMsg, setErrorMsg] = useState(null);
+
+  // Lock body scroll and listen for Escape key
+  useEffect(() => {
+    if (isOpen) {
+      const prevOverflow = document.body.style.overflow;
+      document.body.style.overflow = 'hidden';
+      const handleKeyDown = (e) => {
+        if (e.key === 'Escape' && !submitting) onClose?.();
+      };
+      window.addEventListener('keydown', handleKeyDown);
+      return () => {
+        document.body.style.overflow = prevOverflow;
+        window.removeEventListener('keydown', handleKeyDown);
+      };
+    }
+  }, [isOpen, submitting, onClose]);
 
   if (!isOpen) return null;
 
@@ -59,9 +76,12 @@ export default function DeleteAccountModal({ isOpen, onClose, user, onAccountDel
   const isTenant = user?.role === 'tenant';
   const isRootAdmin = user?.role === 'root_admin';
 
-  return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-slate-900/60 backdrop-blur-sm animate-fadeIn">
-      <div className="bg-white rounded-3xl max-w-md w-full p-6 sm:p-7 space-y-5 shadow-2xl border border-rose-100 animate-scaleIn">
+  const modalContent = (
+    <div className="fixed inset-0 z-50 overflow-y-auto bg-slate-900/60 backdrop-blur-sm flex items-center justify-center p-3 sm:p-4 overscroll-contain animate-fadeIn">
+      {/* Backdrop click to close */}
+      <div className="fixed inset-0" onClick={handleClose} aria-hidden="true" />
+
+      <div className="relative z-10 my-auto bg-white rounded-3xl max-w-md w-full p-6 sm:p-7 space-y-5 shadow-2xl border border-rose-100 animate-scaleIn">
         {/* Header */}
         <div className="flex items-center justify-between border-b border-slate-100 pb-3">
           <div className="flex items-center gap-2.5">
@@ -182,4 +202,8 @@ export default function DeleteAccountModal({ isOpen, onClose, user, onAccountDel
       </div>
     </div>
   );
+
+  return typeof document !== 'undefined'
+    ? createPortal(modalContent, document.body)
+    : modalContent;
 }

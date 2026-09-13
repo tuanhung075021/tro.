@@ -6,6 +6,7 @@
 import React, { useState, useEffect, useCallback } from 'react';
 import { useAuth } from '../context/AuthContext';
 import { useToast } from '../context/ToastContext';
+import { useRealtimeEvent } from '../context/WebSocketContext';
 import { admin as adminApi } from '../services/api';
 import {
   Scale,
@@ -37,6 +38,7 @@ import {
   Lock,
   Unlock,
   Copy,
+  MoreVertical,
 } from 'lucide-react';
 
 export default function AdminDashboard() {
@@ -67,6 +69,15 @@ export default function AdminDashboard() {
   ]);
   const [vatRate, setVatRate] = useState(8);
   const [waterRate, setWaterRate] = useState(8500);
+  const [waterVatRate, setWaterVatRate] = useState(5);
+  const [waterEnvFeeRate, setWaterEnvFeeRate] = useState(10);
+  const [fallbackTierNumber, setFallbackTierNumber] = useState(3);
+  const [fallbackFlatPrice, setFallbackFlatPrice] = useState('');
+  const [legalBasisElec, setLegalBasisElec] = useState('QĐ 1279/QĐ-BCT & TT 60/2025/TT-BCT');
+  const [legalBasisVat, setLegalBasisVat] = useState('Nghị quyết 204/2025/QH15');
+  const [complianceDecree, setComplianceDecree] = useState('Nghị định 104/2022/NĐ-CP & NĐ 17/2022/NĐ-CP');
+  const [penaltyText, setPenaltyText] = useState('20.000.000 đ đến 30.000.000 đ');
+  const [tier3RuleNote, setTier3RuleNote] = useState('Khoản 4 Điều 10 Thông tư 60/2025/TT-BCT');
   const [tariffVersion, setTariffVersion] = useState('');
   const [tariffNote, setTariffNote] = useState('');
 
@@ -95,6 +106,15 @@ export default function AdminDashboard() {
   const [revealError, setRevealError] = useState('');
   const [copiedSecret, setCopiedSecret] = useState(false);
 
+  // 3-dots Action Menu & 4-role Modal State
+  const [openMenuAdminId, setOpenMenuAdminId] = useState(null);
+  const [roleModal, setRoleModal] = useState({
+    open: false,
+    admin: null,
+    selectedRole: 'admin',
+    loading: false,
+  });
+
   // ============================================================================
   // Load Tariff Data
   // ============================================================================
@@ -121,6 +141,15 @@ export default function AdminDashboard() {
       }
       setVatRate(tariffRes.vat_rate > 1 ? tariffRes.vat_rate : Math.round(tariffRes.vat_rate * 100));
       setWaterRate(tariffRes.water_rate || 8500);
+      setWaterVatRate(tariffRes.water_vat_rate > 1 ? tariffRes.water_vat_rate : Math.round((tariffRes.water_vat_rate ?? 0.05) * 100));
+      setWaterEnvFeeRate(tariffRes.water_env_fee_rate > 1 ? tariffRes.water_env_fee_rate : Math.round((tariffRes.water_env_fee_rate ?? 0.10) * 100));
+      setFallbackTierNumber(tariffRes.fallback_tier_number || 3);
+      setFallbackFlatPrice(tariffRes.fallback_flat_price != null ? tariffRes.fallback_flat_price : '');
+      setLegalBasisElec(tariffRes.legal_basis_elec || 'QĐ 1279/QĐ-BCT & TT 60/2025/TT-BCT');
+      setLegalBasisVat(tariffRes.legal_basis_vat || 'Nghị quyết 204/2025/QH15');
+      setComplianceDecree(tariffRes.compliance_decree || 'Nghị định 104/2022/NĐ-CP & NĐ 17/2022/NĐ-CP');
+      setPenaltyText(tariffRes.penalty_text || '20.000.000 đ đến 30.000.000 đ');
+      setTier3RuleNote(tariffRes.tier3_rule_note || 'Khoản 4 Điều 10 Thông tư 60/2025/TT-BCT');
       setTariffVersion(tariffRes.tariff_version || 'QD-1279-2023');
       setTariffHistory(historyRes || []);
     } catch (err) {
@@ -159,6 +188,25 @@ export default function AdminDashboard() {
       fetchAdminData();
     }
   }, [activeTab, isRootAdmin, fetchAdminData]);
+
+  // Realtime WebSocket event listeners
+  useRealtimeEvent('NEW_ADMIN_REQUEST', (data) => {
+    toast.info(`Có yêu cầu Quản trị viên mới từ @${data?.username || 'người dùng'}!`);
+    if (isRootAdmin) {
+      fetchAdminData();
+    }
+  });
+
+  useRealtimeEvent('ADMINS_UPDATED', () => {
+    if (isRootAdmin) {
+      fetchAdminData();
+    }
+  });
+
+  useRealtimeEvent('TARIFF_UPDATED', (data) => {
+    toast.info(`Biểu giá nhà nước vừa được cập nhật (${data?.tariff_version || 'mới'})!`);
+    fetchTariffData();
+  });
 
   // ============================================================================
   // Monotonicity Validation for 6 Electricity Tiers
@@ -205,6 +253,15 @@ export default function AdminDashboard() {
         })),
         vat_rate: Number(vatRate) / 100,
         water_rate: Number(waterRate),
+        water_vat_rate: Number(waterVatRate) / 100,
+        water_env_fee_rate: Number(waterEnvFeeRate) / 100,
+        fallback_tier_number: Number(fallbackTierNumber) || 3,
+        fallback_flat_price: fallbackFlatPrice !== '' && !isNaN(Number(fallbackFlatPrice)) ? Number(fallbackFlatPrice) : undefined,
+        legal_basis_elec: legalBasisElec.trim() || undefined,
+        legal_basis_vat: legalBasisVat.trim() || undefined,
+        compliance_decree: complianceDecree.trim() || undefined,
+        penalty_text: penaltyText.trim() || undefined,
+        tier3_rule_note: tier3RuleNote.trim() || undefined,
         tariff_version: tariffVersion.trim() || undefined,
         note: tariffNote.trim() || undefined,
       };
@@ -212,7 +269,7 @@ export default function AdminDashboard() {
       const res = await adminApi.updateTariff(payload);
       setTariff(res);
       setTariffNote('');
-      toast.success('Lưu biểu giá mới thành công!');
+      toast.success('Lưu biểu giá và căn cứ pháp lý mới thành công!');
       // Reload history
       const historyRes = await adminApi.getTariffHistory();
       setTariffHistory(historyRes || []);
@@ -242,9 +299,18 @@ export default function AdminDashboard() {
       }
       setVatRate(res.vat_rate > 1 ? res.vat_rate : Math.round(res.vat_rate * 100));
       setWaterRate(res.water_rate || 8500);
+      setWaterVatRate(res.water_vat_rate > 1 ? res.water_vat_rate : Math.round((res.water_vat_rate ?? 0.05) * 100));
+      setWaterEnvFeeRate(res.water_env_fee_rate > 1 ? res.water_env_fee_rate : Math.round((res.water_env_fee_rate ?? 0.10) * 100));
+      setFallbackTierNumber(res.fallback_tier_number || 3);
+      setFallbackFlatPrice(res.fallback_flat_price != null ? res.fallback_flat_price : '');
+      setLegalBasisElec(res.legal_basis_elec || 'QĐ 1279/QĐ-BCT & TT 60/2025/TT-BCT');
+      setLegalBasisVat(res.legal_basis_vat || 'Nghị quyết 204/2025/QH15');
+      setComplianceDecree(res.compliance_decree || 'Nghị định 104/2022/NĐ-CP & NĐ 17/2022/NĐ-CP');
+      setPenaltyText(res.penalty_text || '20.000.000 đ đến 30.000.000 đ');
+      setTier3RuleNote(res.tier3_rule_note || 'Khoản 4 Điều 10 Thông tư 60/2025/TT-BCT');
       setTariffVersion(res.tariff_version || 'QD-1279-2023');
       setShowResetModal(false);
-      toast.success('Đã khôi phục biểu giá chuẩn QĐ 1279/QĐ-BCT thành công!');
+      toast.success('Đã khôi phục biểu giá và căn cứ chuẩn QĐ 1279 thành công!');
       const historyRes = await adminApi.getTariffHistory();
       setTariffHistory(historyRes || []);
     } catch (err) {
@@ -300,6 +366,52 @@ export default function AdminDashboard() {
     }
   };
 
+  const handleOpenRoleModal = (adminUser) => {
+    setRoleModal({
+      open: true,
+      admin: adminUser,
+      selectedRole: adminUser.role,
+      loading: false,
+    });
+    setOpenMenuAdminId(null);
+  };
+
+  const handleConfirmRoleChange = async () => {
+    if (!roleModal.admin) return;
+    const { id, username, role: currentRole } = roleModal.admin;
+    const newRole = roleModal.selectedRole;
+
+    if (currentRole === newRole) {
+      setRoleModal({ open: false, admin: null, selectedRole: 'admin', loading: false });
+      return;
+    }
+
+    if (currentRole === 'root_admin' && newRole !== 'root_admin') {
+      const rootCount = admins.filter((a) => a.role === 'root_admin').length;
+      if (rootCount <= 1) {
+        toast.error('Không thể hạ quyền Root Admin duy nhất của hệ thống');
+        return;
+      }
+    }
+
+    setRoleModal((prev) => ({ ...prev, loading: true }));
+    try {
+      await adminApi.changeRole(id, newRole);
+      const roleNames = {
+        landlord: 'Chủ trọ',
+        tenant: 'Người thuê',
+        admin: 'Quản trị viên',
+        root_admin: 'Root Admin',
+      };
+      toast.success(`Đã cập nhật vai trò của @${username} thành ${roleNames[newRole] || newRole}!`);
+      setRoleModal({ open: false, admin: null, selectedRole: 'admin', loading: false });
+      fetchAdminData();
+    } catch (err) {
+      toast.error(err.message || 'Cập nhật vai trò thất bại');
+      setRoleModal((prev) => ({ ...prev, loading: false }));
+    }
+  };
+
   const handleOpenRevealModal = () => {
     setRevealPassword('');
     setShowRevealPassword(false);
@@ -343,7 +455,7 @@ export default function AdminDashboard() {
   const handleRotateSecret = async () => {
     const trimmedSecret = newSecret.trim();
     if (trimmedSecret.length < 8) {
-      toast.error('Khóa bí mật phải có ít nhất 8 ký tự');
+      toast.error('Mã bảo mật quản trị phải có ít nhất 8 ký tự');
       return;
     }
     if (!rotateAdminPassword) {
@@ -356,7 +468,7 @@ export default function AdminDashboard() {
         new_secret: trimmedSecret,
         admin_password: rotateAdminPassword,
       });
-      toast.success('Cập nhật khóa bí mật thành công!');
+      toast.success('Cập nhật mã bảo mật quản trị thành công!');
       setShowRotateConfirm(false);
       setNewSecret('');
       setRotateAdminPassword('');
@@ -570,11 +682,11 @@ export default function AdminDashboard() {
 
               {/* General Settings: VAT, Water, Version, Note */}
               <div className="p-4 sm:p-5 rounded-2xl bg-slate-50 border border-slate-200/80 space-y-4">
-                <h3 className="text-xs sm:text-sm font-bold text-slate-800">
-                  Thông số Thuế, Nước sinh hoạt & Ghi chú Phiên bản
+                <h3 className="text-xs sm:text-sm font-bold text-slate-800 flex items-center gap-2">
+                  <span>Thông số Thuế & Nước sinh hoạt</span>
                 </h3>
 
-                <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
+                <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-4">
                   <div>
                     <label className="block text-xs text-slate-600 font-medium mb-1">
                       Thuế suất VAT Điện (%)
@@ -616,7 +728,47 @@ export default function AdminDashboard() {
 
                   <div>
                     <label className="block text-xs text-slate-600 font-medium mb-1">
-                      Mã Phiên bản Mới
+                      Thuế suất VAT Nước sạch (%)
+                    </label>
+                    <div className="relative">
+                      <input
+                        type="number"
+                        min="0"
+                        max="100"
+                        step="1"
+                        value={waterVatRate}
+                        onChange={(e) => setWaterVatRate(e.target.value)}
+                        required
+                        className="w-full min-h-[44px] px-3 py-2 text-sm font-mono font-bold rounded-xl border border-slate-300 bg-white text-slate-900 focus:border-primary-500 focus:ring-2 focus:ring-primary-100"
+                      />
+                      <span className="absolute right-3 top-3 text-xs text-slate-400">%</span>
+                    </div>
+                    <span className="text-[10px] text-slate-400 mt-1 block">Mặc định 5%</span>
+                  </div>
+
+                  <div>
+                    <label className="block text-xs text-slate-600 font-medium mb-1">
+                      Phí Bảo vệ môi trường Nước (%)
+                    </label>
+                    <div className="relative">
+                      <input
+                        type="number"
+                        min="0"
+                        max="100"
+                        step="1"
+                        value={waterEnvFeeRate}
+                        onChange={(e) => setWaterEnvFeeRate(e.target.value)}
+                        required
+                        className="w-full min-h-[44px] px-3 py-2 text-sm font-mono font-bold rounded-xl border border-slate-300 bg-white text-slate-900 focus:border-primary-500 focus:ring-2 focus:ring-primary-100"
+                      />
+                      <span className="absolute right-3 top-3 text-xs text-slate-400">%</span>
+                    </div>
+                    <span className="text-[10px] text-slate-400 mt-1 block">Mặc định 10%</span>
+                  </div>
+
+                  <div>
+                    <label className="block text-xs text-slate-600 font-medium mb-1">
+                      Mã Phiên bản Biểu giá Mới
                     </label>
                     <input
                       type="text"
@@ -630,7 +782,7 @@ export default function AdminDashboard() {
 
                   <div>
                     <label className="block text-xs text-slate-600 font-medium mb-1">
-                      Ghi chú Thay đổi
+                      Ghi chú Thay đổi (ChangeLog)
                     </label>
                     <input
                       type="text"
@@ -640,6 +792,145 @@ export default function AdminDashboard() {
                       className="w-full min-h-[44px] px-3 py-2 text-sm rounded-xl border border-slate-300 bg-white text-slate-900 focus:border-primary-500 focus:ring-2 focus:ring-primary-100"
                     />
                     <span className="text-[10px] text-slate-400 mt-1 block">Lưu vào ChangeLog</span>
+                  </div>
+                </div>
+              </div>
+
+              {/* Mechanism when Room has No Quota */}
+              <div className="p-4 sm:p-5 rounded-2xl bg-amber-50/70 border border-amber-200 space-y-4">
+                <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2">
+                  <div>
+                    <h3 className="text-xs sm:text-sm font-bold text-amber-950 flex items-center gap-1.5">
+                      <Zap className="w-4 h-4 text-amber-600" />
+                      <span>Cơ chế áp dụng khi phòng KHÔNG có định mức (chưa đăng ký số người)</span>
+                    </h3>
+                    <p className="text-[11px] text-amber-800 mt-0.5">
+                      Quy định mức giá áp dụng cho công tơ phòng trọ khi người thuê không kê khai định mức số người.
+                    </p>
+                  </div>
+                </div>
+
+                <div className="grid grid-cols-1 sm:grid-cols-3 gap-4">
+                  <div>
+                    <label className="block text-xs text-amber-900 font-semibold mb-1">
+                      Bậc điện áp dụng mặc định
+                    </label>
+                    <select
+                      value={fallbackTierNumber}
+                      onChange={(e) => setFallbackTierNumber(Number(e.target.value))}
+                      className="w-full min-h-[44px] px-3 py-2 text-sm font-bold rounded-xl border border-amber-300 bg-white text-slate-900 focus:border-amber-500 focus:ring-2 focus:ring-amber-200"
+                    >
+                      {[1, 2, 3, 4, 5, 6].map((num) => (
+                        <option key={num} value={num}>
+                          Bậc {num} ({tiers[num - 1]?.unit_price?.toLocaleString('vi-VN')} đ/kWh)
+                        </option>
+                      ))}
+                    </select>
+                    <span className="text-[10px] text-amber-700 mt-1 block">Luật định hiện hành: Bậc 3</span>
+                  </div>
+
+                  <div>
+                    <label className="block text-xs text-amber-900 font-semibold mb-1">
+                      Hoặc Đơn giá phẳng riêng (đ/kWh)
+                    </label>
+                    <div className="relative">
+                      <input
+                        type="number"
+                        min="0"
+                        step="10"
+                        placeholder="Để trống nếu dùng theo Bậc"
+                        value={fallbackFlatPrice}
+                        onChange={(e) => setFallbackFlatPrice(e.target.value)}
+                        className="w-full min-h-[44px] px-3 py-2 text-sm font-mono font-bold rounded-xl border border-amber-300 bg-white text-slate-900 focus:border-amber-500 focus:ring-2 focus:ring-amber-200"
+                      />
+                      <span className="absolute right-3 top-3 text-xs text-slate-400">đ</span>
+                    </div>
+                    <span className="text-[10px] text-amber-700 mt-1 block">Tùy chọn ghi đè đơn giá cố định</span>
+                  </div>
+
+                  <div>
+                    <label className="block text-xs text-amber-900 font-semibold mb-1">
+                      Căn cứ pháp lý điều khoản áp dụng
+                    </label>
+                    <input
+                      type="text"
+                      placeholder="VD: Khoản 4 Điều 10 Thông tư 60/2025/TT-BCT"
+                      value={tier3RuleNote}
+                      onChange={(e) => setTier3RuleNote(e.target.value)}
+                      className="w-full min-h-[44px] px-3 py-2 text-sm rounded-xl border border-amber-300 bg-white text-slate-900 focus:border-amber-500 focus:ring-2 focus:ring-amber-200"
+                    />
+                    <span className="text-[10px] text-amber-700 mt-1 block">Hiển thị trong hộp lưu ý Biểu giá</span>
+                  </div>
+                </div>
+              </div>
+
+              {/* Statutory Legal Basis & Compliance Decree Section */}
+              <div className="p-4 sm:p-5 rounded-2xl bg-blue-50/70 border border-blue-200 space-y-4">
+                <div>
+                  <h3 className="text-xs sm:text-sm font-bold text-blue-950 flex items-center gap-1.5">
+                    <ShieldCheck className="w-4 h-4 text-blue-600" />
+                    <span>Căn cứ pháp lý & Chế tài tuân thủ (Đồng bộ toàn hệ thống)</span>
+                  </h3>
+                  <p className="text-[11px] text-blue-800 mt-0.5">
+                    Toàn bộ nội dung văn bản dưới đây sẽ tự động hiển thị trên Hóa đơn, Modal Biểu giá, Cảnh báo vi phạm của Chủ trọ và Người thuê.
+                  </p>
+                </div>
+
+                <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+                  <div>
+                    <label className="block text-xs text-blue-900 font-semibold mb-1">
+                      Căn cứ pháp lý tính Biểu giá điện 6 bậc
+                    </label>
+                    <input
+                      type="text"
+                      placeholder="VD: QĐ 1279/QĐ-BCT & TT 60/2025/TT-BCT"
+                      value={legalBasisElec}
+                      onChange={(e) => setLegalBasisElec(e.target.value)}
+                      className="w-full min-h-[44px] px-3 py-2 text-sm rounded-xl border border-blue-300 bg-white text-slate-900 focus:border-blue-500 focus:ring-2 focus:ring-blue-200"
+                    />
+                    <span className="text-[10px] text-blue-600 mt-1 block">Tiêu đề thẻ biểu giá điện trong TariffModal</span>
+                  </div>
+
+                  <div>
+                    <label className="block text-xs text-blue-900 font-semibold mb-1">
+                      Căn cứ pháp lý Thuế suất VAT
+                    </label>
+                    <input
+                      type="text"
+                      placeholder="VD: Nghị quyết 204/2025/QH15"
+                      value={legalBasisVat}
+                      onChange={(e) => setLegalBasisVat(e.target.value)}
+                      className="w-full min-h-[44px] px-3 py-2 text-sm rounded-xl border border-blue-300 bg-white text-slate-900 focus:border-blue-500 focus:ring-2 focus:ring-blue-200"
+                    />
+                    <span className="text-[10px] text-blue-600 mt-1 block">Tiêu đề thẻ thuế VAT trong TariffModal</span>
+                  </div>
+
+                  <div>
+                    <label className="block text-xs text-blue-900 font-semibold mb-1">
+                      Văn bản pháp lý chế tài vi phạm thu lố
+                    </label>
+                    <input
+                      type="text"
+                      placeholder="VD: Nghị định 104/2022/NĐ-CP & NĐ 17/2022/NĐ-CP"
+                      value={complianceDecree}
+                      onChange={(e) => setComplianceDecree(e.target.value)}
+                      className="w-full min-h-[44px] px-3 py-2 text-sm rounded-xl border border-blue-300 bg-white text-slate-900 focus:border-blue-500 focus:ring-2 focus:ring-blue-200"
+                    />
+                    <span className="text-[10px] text-blue-600 mt-1 block">Hiển thị trong các tiêu đề cảnh báo vi phạm định mức</span>
+                  </div>
+
+                  <div>
+                    <label className="block text-xs text-blue-900 font-semibold mb-1">
+                      Khung mức phạt tiền vi phạm thu lố
+                    </label>
+                    <input
+                      type="text"
+                      placeholder="VD: 20.000.000 đ đến 30.000.000 đ"
+                      value={penaltyText}
+                      onChange={(e) => setPenaltyText(e.target.value)}
+                      className="w-full min-h-[44px] px-3 py-2 text-sm font-semibold rounded-xl border border-blue-300 bg-white text-slate-900 focus:border-blue-500 focus:ring-2 focus:ring-blue-200"
+                    />
+                    <span className="text-[10px] text-blue-600 mt-1 block">Hiển thị trong cảnh báo chế tài của chủ trọ và hóa đơn công khai</span>
                   </div>
                 </div>
               </div>
@@ -855,7 +1146,7 @@ export default function AdminDashboard() {
               </button>
             </div>
 
-            <div className="overflow-x-auto rounded-2xl border border-slate-200 scrollbar-thin">
+            <div className="overflow-x-auto rounded-2xl border border-slate-200 scrollbar-thin min-h-[160px]">
               <table className="w-full text-left text-xs min-w-[600px]">
                 <thead className="bg-slate-50 border-b border-slate-200 text-slate-600 font-semibold">
                   <tr>
@@ -867,9 +1158,10 @@ export default function AdminDashboard() {
                   </tr>
                 </thead>
                 <tbody className="divide-y divide-slate-100">
-                  {admins.map((adm) => {
+                  {admins.map((adm, index) => {
                     const isSelf = adm.id === user?.id;
                     const isAdmRoot = adm.role === 'root_admin';
+                    const isLast = admins.length > 1 && index >= admins.length - 1;
                     return (
                       <tr key={adm.id} className="hover:bg-slate-50/60 transition-colors">
                         <td className="py-3 px-4 font-mono font-bold text-slate-900 whitespace-nowrap">
@@ -900,26 +1192,50 @@ export default function AdminDashboard() {
                           {formatDate(adm.created_at)}
                         </td>
                         <td className="py-3 px-4 text-right whitespace-nowrap">
-                          {isAdmRoot ? (
+                          <div className="relative inline-block text-left">
                             <button
-                              onClick={() => handleDemote(adm.id, adm.username)}
-                              disabled={isSelf && admins.filter((a) => a.role === 'root_admin').length <= 1}
-                              className="min-h-[36px] px-3 py-1 bg-amber-50 hover:bg-amber-100 text-amber-800 border border-amber-300 font-bold rounded-lg text-xs inline-flex items-center gap-1 transition-colors disabled:opacity-40 disabled:cursor-not-allowed"
-                              title="Hạ quyền xuống Quản trị viên"
+                              onClick={(e) => {
+                                e.stopPropagation();
+                                setOpenMenuAdminId(openMenuAdminId === adm.id ? null : adm.id);
+                              }}
+                              className={`min-h-[36px] min-w-[36px] p-2 rounded-xl transition-colors inline-flex items-center justify-center border ${
+                                openMenuAdminId === adm.id
+                                  ? 'bg-primary-50 text-primary-600 border-primary-200 shadow-sm'
+                                  : 'hover:bg-slate-100 text-slate-600 hover:text-slate-900 border-transparent hover:border-slate-200'
+                              }`}
+                              title="Tùy chọn thao tác"
+                              aria-label="Tùy chọn thao tác"
                             >
-                              <UserMinus className="w-3.5 h-3.5" />
-                              <span>Hạ quyền</span>
+                              <MoreVertical className="w-4 h-4" />
                             </button>
-                          ) : (
-                            <button
-                              onClick={() => handlePromote(adm.id, adm.username)}
-                              className="min-h-[36px] px-3 py-1 bg-purple-50 hover:bg-purple-100 text-purple-800 border border-purple-300 font-bold rounded-lg text-xs inline-flex items-center gap-1 transition-colors"
-                              title="Nâng cấp lên Root Admin"
-                            >
-                              <ArrowUpRight className="w-3.5 h-3.5" />
-                              <span>Nâng cấp Root</span>
-                            </button>
-                          )}
+
+                            {openMenuAdminId === adm.id && (
+                              <>
+                                <div
+                                  className="fixed inset-0 z-20"
+                                  onClick={(e) => {
+                                    e.stopPropagation();
+                                    setOpenMenuAdminId(null);
+                                  }}
+                                />
+                                <div
+                                  className={`absolute right-0 ${
+                                    isLast
+                                      ? 'bottom-full mb-1.5 origin-bottom-right'
+                                      : 'top-full mt-1.5 origin-top-right'
+                                  } w-52 bg-white rounded-2xl shadow-2xl border border-slate-200 py-1.5 z-30 animate-scaleIn`}
+                                >
+                                  <button
+                                    onClick={() => handleOpenRoleModal(adm)}
+                                    className="w-full px-4 py-2.5 text-left text-xs font-semibold text-slate-700 hover:bg-primary-50 hover:text-primary-700 flex items-center gap-2.5 transition-colors"
+                                  >
+                                    <Users className="w-4 h-4 text-primary-600" />
+                                    <span>Phân quyền vai trò</span>
+                                  </button>
+                                </div>
+                              </>
+                            )}
+                          </div>
                         </td>
                       </tr>
                     );
@@ -929,7 +1245,7 @@ export default function AdminDashboard() {
             </div>
           </div>
 
-          {/* Cập nhật Khóa bí mật Admin */}
+          {/* Cập nhật Mã bảo mật Quản trị */}
           <div className="bg-white rounded-3xl border border-slate-200 shadow-sm p-5 sm:p-7 space-y-4">
             <div className="flex items-center gap-2.5 border-b border-slate-100 pb-3">
               <div className="w-9 h-9 rounded-xl bg-amber-50 text-amber-600 flex items-center justify-center flex-shrink-0">
@@ -937,7 +1253,7 @@ export default function AdminDashboard() {
               </div>
               <div>
                 <h2 className="text-base sm:text-lg font-bold text-slate-900">
-                  Cập nhật Khóa bí mật Admin
+                  Cập nhật Mã bảo mật Quản trị
                 </h2>
                 <p className="text-xs text-slate-500">
                   Cú pháp tạo tài khoản: <code className="font-mono text-slate-700 bg-slate-100 px-1 py-0.5 rounded">username::secret_key</code>
@@ -945,10 +1261,10 @@ export default function AdminDashboard() {
               </div>
             </div>
 
-            {/* Khóa hiện tại (hiển thị ngay dưới title) */}
+            {/* Mã bảo mật hiện tại (hiển thị ngay dưới title) */}
             <div className="p-3.5 rounded-2xl bg-slate-50 border border-slate-200 flex flex-col sm:flex-row sm:items-center justify-between gap-3">
               <div className="flex items-center gap-2 min-w-0">
-                <span className="text-xs font-semibold text-slate-600 flex-shrink-0">Khóa hiện tại:</span>
+                <span className="text-xs font-semibold text-slate-600 flex-shrink-0">Mã hiện tại:</span>
                 {activeSecret ? (
                   <span className="font-mono text-xs sm:text-sm font-bold text-amber-950 bg-amber-100/80 border border-amber-300 px-2.5 py-1 rounded-lg select-all break-all">
                     {activeSecret}
@@ -967,7 +1283,7 @@ export default function AdminDashboard() {
                       type="button"
                       onClick={handleCopySecret}
                       className="px-3 py-1.5 bg-amber-600 hover:bg-amber-700 active:scale-95 text-white font-semibold text-xs rounded-xl inline-flex items-center gap-1.5 transition-all"
-                      title="Sao chép khóa"
+                      title="Sao chép mã"
                     >
                       {copiedSecret ? <Check className="w-3.5 h-3.5" /> : <Copy className="w-3.5 h-3.5" />}
                       <span>{copiedSecret ? 'Đã sao chép' : 'Sao chép'}</span>
@@ -976,7 +1292,7 @@ export default function AdminDashboard() {
                       type="button"
                       onClick={() => setActiveSecret(null)}
                       className="px-3 py-1.5 bg-slate-200 hover:bg-slate-300 active:scale-95 text-slate-700 font-semibold text-xs rounded-xl inline-flex items-center gap-1.5 transition-all"
-                      title="Ẩn khóa"
+                      title="Ẩn mã"
                     >
                       <EyeOff className="w-3.5 h-3.5" />
                       <span>Ẩn</span>
@@ -989,22 +1305,22 @@ export default function AdminDashboard() {
                     className="px-3 py-1.5 bg-slate-900 hover:bg-slate-800 active:scale-95 text-white font-semibold text-xs rounded-xl inline-flex items-center gap-1.5 transition-all"
                   >
                     <Lock className="w-3.5 h-3.5 text-amber-400" />
-                    <span>Xem khóa</span>
+                    <span>Xem mã</span>
                   </button>
                 )}
               </div>
             </div>
 
-            {/* Form Cập nhật Khóa */}
+            {/* Form Cập nhật Mã */}
             <div className="space-y-3 pt-1">
               <p className="text-xs text-slate-500">
-                Lưu ý: Sau khi đổi khóa mới, khóa cũ sẽ hết hiệu lực và các yêu cầu đăng ký chưa duyệt sẽ bị hủy.
+                Lưu ý: Sau khi đổi mã mới, mã cũ sẽ hết hiệu lực và các yêu cầu đăng ký chưa duyệt sẽ bị hủy.
               </p>
 
               <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 max-w-2xl">
                 <div>
                   <label className="block text-xs font-semibold text-slate-700 mb-1">
-                    Khóa bí mật mới (tối thiểu 8 ký tự)
+                    Mã bảo mật mới (tối thiểu 8 ký tự)
                   </label>
                   <div className="relative">
                     <input
@@ -1082,7 +1398,7 @@ export default function AdminDashboard() {
                 Xác thực Root Admin
               </h3>
               <p className="text-xs text-slate-500 leading-relaxed">
-                Nhập mật khẩu tài khoản của bạn để xem khóa bí mật hiện tại.
+                Nhập mật khẩu tài khoản của bạn để xem mã bảo mật quản trị hiện tại.
               </p>
             </div>
 
@@ -1250,13 +1566,13 @@ export default function AdminDashboard() {
 
             <div className="text-center space-y-2">
               <h3 className="text-base sm:text-lg font-black text-slate-900">
-                Xác nhận cập nhật khóa bí mật?
+                Xác nhận cập nhật mã bảo mật?
               </h3>
               <p className="text-xs text-slate-600 leading-relaxed">
-                Khóa cũ sẽ hết hiệu lực ngay lập tức và các yêu cầu đang chờ duyệt từ khóa cũ sẽ bị hủy.
+                Mã cũ sẽ hết hiệu lực ngay lập tức và các yêu cầu đang chờ duyệt từ mã cũ sẽ bị hủy.
               </p>
               <div className="bg-slate-50 p-3 rounded-2xl border border-slate-200 text-left text-xs space-y-1">
-                <div className="text-slate-500 font-medium">Khóa mới sẽ áp dụng:</div>
+                <div className="text-slate-500 font-medium">Mã mới sẽ áp dụng:</div>
                 <div className="font-mono font-bold text-slate-800 break-all select-all">{newSecret}</div>
               </div>
             </div>
@@ -1326,6 +1642,127 @@ export default function AdminDashboard() {
                 className="min-h-[40px] px-5 py-2 bg-slate-800 hover:bg-slate-900 text-white font-bold text-xs rounded-xl"
               >
                 Đóng
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* ==================================================================== */}
+      {/* MODAL: Phân quyền vai trò 4 cấp                                     */}
+      {/* ==================================================================== */}
+      {roleModal.open && roleModal.admin && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-slate-900/60 backdrop-blur-sm animate-fadeIn">
+          <div className="bg-white rounded-3xl max-w-md w-full p-6 space-y-4 shadow-2xl border border-slate-200 animate-scaleIn">
+            <div className="w-12 h-12 rounded-2xl bg-indigo-50 text-indigo-600 flex items-center justify-center mx-auto">
+              <Users className="w-6 h-6" />
+            </div>
+
+            <div className="text-center space-y-1">
+              <h3 className="text-base sm:text-lg font-black text-slate-900">
+                Phân quyền vai trò
+              </h3>
+              <p className="text-xs text-slate-500">
+                Tài khoản: <strong className="font-mono text-slate-800">@{roleModal.admin.username}</strong> ({roleModal.admin.full_name || 'Chưa cập nhật'})
+              </p>
+            </div>
+
+            {/* 4 Role Selection Cards */}
+            <div className="space-y-2 pt-2">
+              {[
+                {
+                  id: 'landlord',
+                  name: 'Chủ trọ',
+                  desc: 'Quản lý phòng, khu trọ, hóa đơn và khách thuê',
+                  icon: '🏢',
+                },
+                {
+                  id: 'tenant',
+                  name: 'Người thuê',
+                  desc: 'Xem phòng, hóa đơn và nhận thông báo lưu trú',
+                  icon: '👤',
+                },
+                {
+                  id: 'admin',
+                  name: 'Quản trị viên',
+                  desc: 'Quản trị biểu giá nhà nước và thông số hệ thống',
+                  icon: '🛡️',
+                },
+                {
+                  id: 'root_admin',
+                  name: 'Root Admin',
+                  desc: 'Toàn quyền quản trị viên cao cấp, phê duyệt và cấp quyền',
+                  icon: '👑',
+                },
+              ].map((roleOpt) => {
+                const isSelected = roleModal.selectedRole === roleOpt.id;
+                const isCurrent = roleModal.admin.role === roleOpt.id;
+                const isSoleRootDemote =
+                  roleModal.admin.role === 'root_admin' &&
+                  roleOpt.id !== 'root_admin' &&
+                  admins.filter((a) => a.role === 'root_admin').length <= 1;
+
+                return (
+                  <label
+                    key={roleOpt.id}
+                    className={`flex items-start gap-3 p-3 rounded-2xl border cursor-pointer transition-all ${
+                      isSelected
+                        ? 'border-primary-500 bg-primary-50/50 shadow-sm'
+                        : 'border-slate-200 hover:border-slate-300 bg-white'
+                    } ${isSoleRootDemote ? 'opacity-50 cursor-not-allowed' : ''}`}
+                  >
+                    <input
+                      type="radio"
+                      name="assignedRole"
+                      value={roleOpt.id}
+                      checked={isSelected}
+                      disabled={isSoleRootDemote}
+                      onChange={() => setRoleModal((prev) => ({ ...prev, selectedRole: roleOpt.id }))}
+                      className="mt-1 text-primary-600 focus:ring-primary-500"
+                    />
+                    <div className="flex-1 text-xs">
+                      <div className="flex items-center gap-1.5 font-bold text-slate-900">
+                        <span>{roleOpt.icon}</span>
+                        <span>{roleOpt.name}</span>
+                        {isCurrent && (
+                          <span className="text-[10px] px-1.5 py-0.5 bg-slate-100 text-slate-600 rounded-md font-normal">
+                            Hiện tại
+                          </span>
+                        )}
+                      </div>
+                      <p className="text-[11px] text-slate-500 mt-0.5">{roleOpt.desc}</p>
+                      {isSoleRootDemote && (
+                        <p className="text-[10px] text-red-600 font-semibold mt-1">
+                          ⚠️ Không thể hạ quyền Root Admin duy nhất của hệ thống
+                        </p>
+                      )}
+                    </div>
+                  </label>
+                );
+              })}
+            </div>
+
+            <div className="flex gap-3 pt-3">
+              <button
+                type="button"
+                onClick={() => setRoleModal({ open: false, admin: null, selectedRole: 'admin', loading: false })}
+                disabled={roleModal.loading}
+                className="min-h-[44px] flex-1 px-4 py-2 bg-slate-100 hover:bg-slate-200 text-slate-700 font-semibold text-xs sm:text-sm rounded-xl"
+              >
+                Hủy
+              </button>
+              <button
+                type="button"
+                onClick={handleConfirmRoleChange}
+                disabled={
+                  roleModal.loading ||
+                  (roleModal.admin.role === 'root_admin' &&
+                    roleModal.selectedRole !== 'root_admin' &&
+                    admins.filter((a) => a.role === 'root_admin').length <= 1)
+                }
+                className="min-h-[44px] flex-1 px-4 py-2 bg-primary-600 hover:bg-primary-700 text-white font-bold text-xs sm:text-sm rounded-xl shadow-md shadow-primary-500/20 disabled:opacity-50 disabled:cursor-not-allowed"
+              >
+                {roleModal.loading ? 'Đang lưu...' : 'Lưu vai trò'}
               </button>
             </div>
           </div>

@@ -183,6 +183,13 @@ class SystemConfigUpdate(BaseModel):
     water_vat_rate: Optional[float] = Field(default=None, ge=0.0, le=1.0)
     water_env_fee_rate: Optional[float] = Field(default=None, ge=0.0, le=1.0)
     tiers: Optional[List[Dict[str, Any]]] = None
+    fallback_tier_number: Optional[int] = Field(default=None, ge=1, le=6)
+    fallback_flat_price: Optional[float] = Field(default=None, ge=0.0)
+    legal_basis_elec: Optional[str] = None
+    legal_basis_vat: Optional[str] = None
+    compliance_decree: Optional[str] = None
+    penalty_text: Optional[str] = None
+    tier3_rule_note: Optional[str] = None
 
     @field_validator("water_pricing_type")
     @classmethod
@@ -246,6 +253,13 @@ class SystemConfigOut(BaseModel):
     water_env_fee_rate: float
     tariff_version: Optional[str] = "QD-1279-2023"
     tariff_updated_at: Optional[datetime] = None
+    fallback_tier_number: Optional[int] = 3
+    fallback_flat_price: Optional[float] = None
+    legal_basis_elec: Optional[str] = "QĐ 1279/QĐ-BCT & TT 60/2025/TT-BCT"
+    legal_basis_vat: Optional[str] = "Nghị quyết 204/2025/QH15"
+    compliance_decree: Optional[str] = "Nghị định 104/2022/NĐ-CP & NĐ 17/2022/NĐ-CP"
+    penalty_text: Optional[str] = "20.000.000 đ đến 30.000.000 đ"
+    tier3_rule_note: Optional[str] = "Khoản 4 Điều 10 Thông tư 60/2025/TT-BCT"
 
     model_config = ConfigDict(from_attributes=True)
 
@@ -399,8 +413,17 @@ class TariffUpdateIn(BaseModel):
     electricity_tiers: List[TariffTierIn]
     vat_rate: float
     water_rate: float
+    water_vat_rate: Optional[float] = None
+    water_env_fee_rate: Optional[float] = None
     note: Optional[str] = None
     tariff_version: Optional[str] = None
+    fallback_tier_number: Optional[int] = Field(default=None, ge=1, le=6)
+    fallback_flat_price: Optional[float] = Field(default=None, ge=0.0)
+    legal_basis_elec: Optional[str] = None
+    legal_basis_vat: Optional[str] = None
+    compliance_decree: Optional[str] = None
+    penalty_text: Optional[str] = None
+    tier3_rule_note: Optional[str] = None
 
     @model_validator(mode="before")
     @classmethod
@@ -422,6 +445,15 @@ class TariffOut(BaseModel):
     electricity_tiers: list
     vat_rate: float
     water_rate: float
+    water_vat_rate: Optional[float] = 0.05
+    water_env_fee_rate: Optional[float] = 0.10
+    fallback_tier_number: Optional[int] = 3
+    fallback_flat_price: Optional[float] = None
+    legal_basis_elec: Optional[str] = "QĐ 1279/QĐ-BCT & TT 60/2025/TT-BCT"
+    legal_basis_vat: Optional[str] = "Nghị quyết 204/2025/QH15"
+    compliance_decree: Optional[str] = "Nghị định 104/2022/NĐ-CP & NĐ 17/2022/NĐ-CP"
+    penalty_text: Optional[str] = "20.000.000 đ đến 30.000.000 đ"
+    tier3_rule_note: Optional[str] = "Khoản 4 Điều 10 Thông tư 60/2025/TT-BCT"
 
     model_config = ConfigDict(from_attributes=True)
 
@@ -454,5 +486,56 @@ class AdminUserOut(BaseModel):
 class DeleteAccountIn(BaseModel):
     """Schema for account deletion confirmation requiring password verification."""
     password: str = Field(..., min_length=1, description="Mật khẩu tài khoản để xác nhận xóa")
+
+
+class AdminRoleUpdateIn(BaseModel):
+    """Schema for updating user role by Root Admin."""
+    role: str = Field(..., description="Vai trò mới: tenant, landlord, admin, hoặc root_admin")
+
+    @field_validator("role")
+    @classmethod
+    def validate_role(cls, v: str) -> str:
+        cleaned = v.strip().lower()
+        if cleaned not in ("tenant", "landlord", "admin", "root_admin"):
+            raise ValueError("Vai trò phải là một trong các giá trị: tenant, landlord, admin, root_admin")
+        return cleaned
+
+
+class OccupancyChangeRequestIn(BaseModel):
+    """Schema for proposing room occupancy change with mandatory password verification."""
+    new_people_count: int = Field(..., ge=1, le=50, description="Số người mới trong phòng")
+    effective_date: str = Field(..., description="Ngày bắt đầu áp dụng (YYYY-MM-DD)")
+    note: Optional[str] = Field(default=None, max_length=500, description="Ghi chú lý do thay đổi")
+    password: str = Field(..., min_length=1, description="Mật khẩu xác thực của người yêu cầu")
+
+
+class OccupancyChangeReviewIn(BaseModel):
+    """Schema for rejecting an occupancy change request with optional reason."""
+    reject_reason: Optional[str] = Field(default=None, max_length=500, description="Lý do từ chối")
+
+
+class OccupancyChangeRequestOut(BaseModel):
+    """Schema for returning occupancy change request details."""
+    id: int
+    room_id: int
+    requested_by_role: str
+    requested_by_id: int
+    requested_by_username: Optional[str] = None
+    old_people_count: int
+    new_people_count: int
+    effective_date: str
+    note: Optional[str] = None
+    status: str
+    reviewed_by_id: Optional[int] = None
+    reviewed_at: Optional[datetime] = None
+    reject_reason: Optional[str] = None
+    created_at: datetime
+
+    model_config = ConfigDict(from_attributes=True)
+
+
+class DeleteEntityIn(BaseModel):
+    """Schema for room or property deletion requiring landlord password confirmation."""
+    password: str = Field(..., min_length=1, description="Mật khẩu chủ trọ để xác nhận xóa")
 
 

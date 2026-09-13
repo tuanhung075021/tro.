@@ -5,6 +5,7 @@
 
 import React, { useState, useEffect, useCallback } from 'react';
 import { invoices as invoiceApi } from '../services/api';
+import { useTariff } from '../context/TariffContext';
 import {
   FileText,
   Search,
@@ -22,9 +23,17 @@ import {
   CheckCircle2,
   Bookmark,
   Loader2,
+  Users,
 } from 'lucide-react';
 
 export default function PublicInvoiceView({ initialToken = '', onBackToHome }) {
+  const {
+    tariffConfig,
+    fallbackTierNumber,
+    legalBasisElec,
+    complianceDecree,
+    penaltyText,
+  } = useTariff();
   const [shareToken, setShareToken] = useState(initialToken);
   const [tokenInput, setTokenInput] = useState(initialToken);
   const [invoice, setInvoice] = useState(null);
@@ -113,9 +122,9 @@ export default function PublicInvoiceView({ initialToken = '', onBackToHome }) {
   const isOvercharged = (invoice?.diff_amount || 0) > 0;
 
   return (
-    <div className="max-w-4xl mx-auto space-y-8">
+    <div className="max-w-4xl mx-auto space-y-4 sm:space-y-8 px-2 sm:px-4 py-2 sm:py-6">
       {/* Top Search Bar */}
-      <div className="bg-white rounded-2xl sm:rounded-3xl p-4 sm:p-8 border border-slate-200/80 shadow-sm no-print">
+      <div className="bg-white rounded-2xl sm:rounded-3xl p-3.5 sm:p-8 border border-slate-200/80 shadow-sm no-print">
         <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 mb-4">
           <div>
             <span className="text-xs font-bold uppercase tracking-wider text-primary-600">
@@ -201,11 +210,11 @@ export default function PublicInvoiceView({ initialToken = '', onBackToHome }) {
           <div className="grid grid-cols-1 sm:grid-cols-3 gap-3 max-w-lg mx-auto pt-4 border-t border-slate-100 text-left">
             <div className="p-3 rounded-xl bg-slate-50 border border-slate-200/80">
               <p className="text-xs font-bold text-slate-800">Chuẩn luật định</p>
-              <p className="text-[11px] text-slate-500 mt-0.5">Áp dụng QĐ 1279 & TT 60/2025/TT-BCT</p>
+              <p className="text-[11px] text-slate-500 mt-0.5">{legalBasisElec}</p>
             </div>
             <div className="p-3 rounded-xl bg-slate-50 border border-slate-200/80">
               <p className="text-xs font-bold text-slate-800">Cảnh báo thu lố</p>
-              <p className="text-[11px] text-slate-500 mt-0.5">Phát hiện chênh lệch NĐ 104/2022/NĐ-CP</p>
+              <p className="text-[11px] text-slate-500 mt-0.5">Phát hiện chênh lệch {complianceDecree}</p>
             </div>
             <div className="p-3 rounded-xl bg-slate-50 border border-slate-200/80">
               <p className="text-xs font-bold text-slate-800">In ấn A4 FOSS</p>
@@ -219,7 +228,7 @@ export default function PublicInvoiceView({ initialToken = '', onBackToHome }) {
       {invoice && !loading && (
         <div className="printable-invoice bg-white rounded-2xl sm:rounded-3xl border border-slate-200/90 shadow-xl overflow-hidden print:shadow-none print:border-none">
           {/* Invoice Header */}
-          <div className="p-4 sm:p-8 bg-slate-900 text-white flex flex-col sm:flex-row sm:items-center justify-between gap-4 print:bg-slate-100 print:text-slate-900 print:border-b print:border-slate-300">
+          <div className="p-3.5 sm:p-8 bg-slate-900 text-white flex flex-col sm:flex-row sm:items-center justify-between gap-4 print:bg-slate-100 print:text-slate-900 print:border-b print:border-slate-300">
             <div>
               <div className="flex flex-wrap items-center gap-2">
                 <span className="text-2xl font-black tracking-tight text-white print:text-slate-900">
@@ -280,7 +289,7 @@ export default function PublicInvoiceView({ initialToken = '', onBackToHome }) {
           </div>
 
           {/* DISPUTE OVERCHARGE BANNER */}
-          <div className="p-4 sm:p-6 border-b border-slate-200">
+          <div className="p-3.5 sm:p-6 border-b border-slate-200">
             {isOvercharged ? (
               <div className="p-4 sm:p-5 bg-red-50 border-2 border-red-500 rounded-2xl text-red-900 space-y-2">
                 <div className="flex items-center gap-2 text-base font-black text-red-600">
@@ -288,7 +297,7 @@ export default function PublicInvoiceView({ initialToken = '', onBackToHome }) {
                   <span>PHÁT HIỆN THU LỐ: {Number(invoice.diff_amount).toLocaleString('vi-VN')} VNĐ!</span>
                 </div>
                 <p className="text-xs sm:text-sm text-red-800 leading-relaxed">
-                  Căn cứ Điều 12 Nghị định 134/2013/NĐ-CP (sửa đổi bởi Nghị định 17/2022/NĐ-CP) và Nghị định 104/2022/NĐ-CP, hành vi thu tiền điện của người thuê trọ cao hơn giá quy định của nhà nước có thể bị phạt tiền từ <strong>20.000.000 đ đến 30.000.000 đ</strong>.
+                  Căn cứ {breakdown.compliance_decree || complianceDecree}, hành vi thu tiền điện của người thuê trọ cao hơn giá quy định của nhà nước có thể bị phạt tiền từ <strong>{breakdown.penalty_text || penaltyText}</strong>.
                 </p>
                 <div className="pt-2 grid grid-cols-1 sm:grid-cols-3 gap-2 sm:gap-4 text-xs font-semibold">
                   <div className="p-2.5 bg-white/70 rounded-xl">
@@ -315,7 +324,7 @@ export default function PublicInvoiceView({ initialToken = '', onBackToHome }) {
             )}
           </div>
 
-          <div className="p-4 sm:p-8 space-y-6 sm:space-y-8">
+          <div className="p-3.5 sm:p-8 space-y-5 sm:space-y-8">
             {/* METER READINGS SECTION */}
             <div className="p-4 bg-slate-50 rounded-2xl border border-slate-200">
               <h3 className="text-xs font-bold uppercase tracking-wider text-slate-700 mb-3 flex items-center gap-1.5">
@@ -365,7 +374,11 @@ export default function PublicInvoiceView({ initialToken = '', onBackToHome }) {
                     <h3 className="text-base font-black text-slate-900">Chi tiết Tiền Điện</h3>
                     <p className="text-xs text-slate-500">
                       Định mức: <strong>{elecBreakdown.quota || 1} hộ</strong> • Phương pháp:{' '}
-                      <strong>{elecBreakdown.method === 'TIER3' ? 'Đồng giá Bậc 3' : 'Bậc thang 6 bậc (QĐ 1279)'}</strong>
+                      <strong>
+                        {elecBreakdown.method === 'TIER3'
+                          ? `Đồng giá Bậc ${elecBreakdown.fallback_tier_number || fallbackTierNumber}`
+                          : `Bậc thang 6 bậc (${breakdown.tariff_version || tariffConfig?.tariff_version || 'Luật định'})`}
+                      </strong>
                     </p>
                   </div>
                 </div>
@@ -376,9 +389,34 @@ export default function PublicInvoiceView({ initialToken = '', onBackToHome }) {
                 </div>
               </div>
 
+              {/* Prorated Mid-Month Occupancy Allocation */}
+              {elecBreakdown.occupancy_prorated?.is_prorated && (
+                <div className="p-3.5 bg-blue-50/80 border border-blue-200 rounded-2xl text-xs space-y-2">
+                  <div className="flex items-center gap-1.5 font-bold text-blue-900">
+                    <Users className="w-4 h-4 text-blue-600" />
+                    <span>Phân bổ định mức theo ngày thực tế (Thông tư 60/2025/TT-BCT)</span>
+                  </div>
+                  <p className="text-blue-700 text-[11px] leading-relaxed">
+                    Trong tháng có thay đổi số người ở ({elecBreakdown.occupancy_prorated.days_in_month} ngày). Tổng nhân-ngày: <strong>{elecBreakdown.occupancy_prorated.total_person_days}</strong> • Định mức bình quân quy đổi: <strong>{elecBreakdown.occupancy_prorated.effective_quota} hộ</strong>.
+                  </p>
+                  <div className="flex flex-wrap gap-2 pt-1">
+                    {elecBreakdown.occupancy_prorated.periods?.map((p, idx) => (
+                      <span key={idx} className="inline-flex items-center gap-1 px-2.5 py-1 bg-white rounded-lg border border-blue-200 font-mono text-[11px] text-blue-800 shadow-xs">
+                        Ngày {p.from_day} - {p.to_day} ({p.days} ngày): <strong>{p.people_count} người</strong>
+                      </span>
+                    ))}
+                  </div>
+                </div>
+              )}
+
               {/* Progressive Tiers Table */}
               {elecBreakdown.tiers && elecBreakdown.tiers.length > 0 && (
-                <div className="overflow-x-auto scrollbar-thin pb-2 rounded-xl border border-slate-100">
+                <div>
+                  <div className="text-[10px] text-slate-400 sm:hidden mb-1 flex items-center justify-between font-medium">
+                    <span>Chi tiết từng bậc điện</span>
+                    <span>← Vuốt ngang để xem đầy đủ →</span>
+                  </div>
+                  <div className="overflow-x-auto scrollbar-thin pb-2 rounded-xl border border-slate-100">
                   <table className="w-full min-w-[500px] text-left text-xs">
                     <thead>
                       <tr className="border-b border-slate-200 text-slate-400 font-semibold uppercase text-[10px] tracking-wider bg-slate-50/50">
@@ -408,7 +446,8 @@ export default function PublicInvoiceView({ initialToken = '', onBackToHome }) {
                     </tbody>
                   </table>
                 </div>
-              )}
+              </div>
+            )}
 
               {/* Electricity Summary Footer */}
               <div className="bg-amber-50/60 p-4 rounded-2xl border border-amber-200/80 flex flex-col sm:flex-row sm:items-center justify-between gap-2 text-xs">

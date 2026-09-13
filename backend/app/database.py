@@ -18,6 +18,8 @@ from .models import (
     SystemConfig,
     TariffChangeLog,
     User,
+    OccupancyChangeRequest,
+    RoomOccupancyLog,
 )
 
 
@@ -99,6 +101,34 @@ def init_db(target_engine: Optional[Any] = None) -> None:
                     pass
                 try:
                     raw_conn.execute("ALTER TABLE adminsecretkey ADD COLUMN encrypted_secret TEXT")
+                except Exception:
+                    pass
+                try:
+                    raw_conn.execute("ALTER TABLE systemconfig ADD COLUMN fallback_tier_number INTEGER DEFAULT 3")
+                except Exception:
+                    pass
+                try:
+                    raw_conn.execute("ALTER TABLE systemconfig ADD COLUMN fallback_flat_price REAL")
+                except Exception:
+                    pass
+                try:
+                    raw_conn.execute("ALTER TABLE systemconfig ADD COLUMN legal_basis_elec TEXT DEFAULT 'QĐ 1279/QĐ-BCT & TT 60/2025/TT-BCT'")
+                except Exception:
+                    pass
+                try:
+                    raw_conn.execute("ALTER TABLE systemconfig ADD COLUMN legal_basis_vat TEXT DEFAULT 'Nghị quyết 204/2025/QH15'")
+                except Exception:
+                    pass
+                try:
+                    raw_conn.execute("ALTER TABLE systemconfig ADD COLUMN compliance_decree TEXT DEFAULT 'Nghị định 104/2022/NĐ-CP & NĐ 17/2022/NĐ-CP'")
+                except Exception:
+                    pass
+                try:
+                    raw_conn.execute("ALTER TABLE systemconfig ADD COLUMN penalty_text TEXT DEFAULT '20.000.000 đ đến 30.000.000 đ'")
+                except Exception:
+                    pass
+                try:
+                    raw_conn.execute("ALTER TABLE systemconfig ADD COLUMN tier3_rule_note TEXT DEFAULT 'Khoản 4 Điều 10 Thông tư 60/2025/TT-BCT'")
                 except Exception:
                     pass
                 raw_conn.execute("UPDATE systemconfig SET tariff_version = 'QD-1279-2023' WHERE tariff_version IS NULL")

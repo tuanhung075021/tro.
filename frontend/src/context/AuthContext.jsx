@@ -11,6 +11,8 @@ const AuthContext = createContext(null);
 export function AuthProvider({ children }) {
   const [user, setUser] = useState(() => {
     try {
+      const activeToken = getToken();
+      if (!activeToken) return null;
       const savedUser = localStorage.getItem('tro_user');
       return savedUser ? JSON.parse(savedUser) : null;
     } catch {
@@ -28,7 +30,12 @@ export function AuthProvider({ children }) {
     async function revalidateSession() {
       const activeToken = getToken();
       if (!activeToken) {
-        if (isMounted) setLoading(false);
+        if (isMounted) {
+          removeToken();
+          setUser(null);
+          setToken(null);
+          setLoading(false);
+        }
         return;
       }
 
@@ -132,17 +139,28 @@ export function AuthProvider({ children }) {
     setAuthError(null);
   }, []);
 
+  // Listen for global session expiration dispatched by API client
+  useEffect(() => {
+    const handleSessionExpired = () => {
+      logout();
+    };
+    window.addEventListener('tro:session_expired', handleSessionExpired);
+    return () => {
+      window.removeEventListener('tro:session_expired', handleSessionExpired);
+    };
+  }, [logout]);
+
   const value = {
     user,
     token,
     loading,
     authError,
     isAuthenticated: Boolean(token && user),
-    isLandlord: user?.role === 'landlord',
-    isTenant: user?.role === 'tenant',
-    isAdmin: user?.role === 'admin' || user?.role === 'root_admin',
-    isRootAdmin: user?.role === 'root_admin',
-    isPendingAdmin: user?.role === 'pending_admin',
+    isLandlord: Boolean(token && user?.role === 'landlord'),
+    isTenant: Boolean(token && user?.role === 'tenant'),
+    isAdmin: Boolean(token && (user?.role === 'admin' || user?.role === 'root_admin')),
+    isRootAdmin: Boolean(token && user?.role === 'root_admin'),
+    isPendingAdmin: Boolean(token && user?.role === 'pending_admin'),
     refreshUser: fetchUserProfile,
     login,
     register,

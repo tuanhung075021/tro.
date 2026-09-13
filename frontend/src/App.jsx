@@ -5,7 +5,9 @@
 
 import React, { useState, useEffect, useCallback } from 'react';
 import { AuthProvider, useAuth } from './context/AuthContext';
+import { WebSocketProvider } from './context/WebSocketContext';
 import { ToastProvider } from './context/ToastContext';
+import { TariffProvider } from './context/TariffContext';
 import Navbar from './components/Navbar';
 import LandingPage from './components/LandingPage';
 import AuthModal from './components/AuthModal';
@@ -185,9 +187,13 @@ function MainLayout() {
 export default function App() {
   return (
     <AuthProvider>
-      <ToastProvider>
-        <MainLayout />
-      </ToastProvider>
+      <WebSocketProvider>
+        <ToastProvider>
+          <TariffProvider>
+            <MainLayout />
+          </TariffProvider>
+        </ToastProvider>
+      </WebSocketProvider>
     </AuthProvider>
   );
 }

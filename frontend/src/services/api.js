@@ -82,13 +82,35 @@ export async function request(endpoint, options = {}) {
     }
 
     if (!response.ok) {
-      const errorMessage =
+      if (
+        response.status === 401 &&
+        typeof window !== 'undefined' &&
+        !endpoint.includes('/auth/login') &&
+        !endpoint.includes('/auth/register')
+      ) {
+        window.dispatchEvent(new CustomEvent('tro:session_expired'));
+      }
+
+      let errorMessage =
         data?.detail ||
         (Array.isArray(data?.detail)
           ? data.detail.map((e) => e.msg || e).join(', ')
           : null) ||
-        data?.message ||
-        `Yêu cầu thất bại với mã lỗi ${response.status} (${response.statusText})`;
+        data?.message;
+
+      if (response.status === 401) {
+        if (
+          errorMessage === 'Authentication credentials were not provided' ||
+          errorMessage?.includes('invalid or expired token') ||
+          errorMessage?.includes('sub missing')
+        ) {
+          errorMessage = 'Phiên đăng nhập đã hết hạn hoặc không hợp lệ. Vui lòng đăng nhập lại.';
+        }
+      }
+
+      if (!errorMessage) {
+        errorMessage = `Yêu cầu thất bại với mã lỗi ${response.status} (${response.statusText})`;
+      }
 
       const error = new Error(errorMessage);
       error.status = response.status;
@@ -203,6 +225,12 @@ export const properties = {
     request(`/properties/${propertyId}/rooms/${roomId}/remove-tenant`, {
       method: 'POST',
     }),
+
+  delete: (id, payload) =>
+    request(`/properties/${id}`, {
+      method: 'DELETE',
+      body: JSON.stringify(typeof payload === 'string' ? { password: payload } : payload),
+    }),
 };
 
 // ----------------------------------------------------------------------------
@@ -266,6 +294,34 @@ export const rooms = {
     request(`/rooms/${roomId}/invoices/calculate`, {
       method: 'POST',
       body: JSON.stringify(data),
+    }),
+
+  delete: (roomId, payload) =>
+    request(`/rooms/${roomId}`, {
+      method: 'DELETE',
+      body: JSON.stringify(typeof payload === 'string' ? { password: payload } : payload),
+    }),
+
+  requestOccupancyChange: (roomId, payload) =>
+    request(`/rooms/${roomId}/occupancy-requests`, {
+      method: 'POST',
+      body: JSON.stringify(payload),
+    }),
+
+  getOccupancyRequests: (roomId) =>
+    request(`/rooms/${roomId}/occupancy-requests`, {
+      method: 'GET',
+    }),
+
+  approveOccupancyRequest: (requestId) =>
+    request(`/occupancy-requests/${requestId}/approve`, {
+      method: 'POST',
+    }),
+
+  rejectOccupancyRequest: (requestId, reject_reason) =>
+    request(`/occupancy-requests/${requestId}/reject`, {
+      method: 'POST',
+      body: JSON.stringify(reject_reason ? { reject_reason } : {}),
     }),
 };
 
@@ -366,6 +422,12 @@ export const admin = {
       method: 'POST',
     }),
 
+  changeRole: (userId, role) =>
+    request(`/admin/users/${userId}/role`, {
+      method: 'PUT',
+      body: JSON.stringify({ role }),
+    }),
+
   rotateSecret: (payload) =>
     request('/admin/secret/rotate', {
       method: 'POST',
@@ -400,6 +462,16 @@ export const admin = {
     }),
 };
 
+// ----------------------------------------------------------------------------
+// Occupancy Change Dual-Approval Helper
+// ----------------------------------------------------------------------------
+export const occupancyRequests = {
+  create: (roomId, payload) => rooms.requestOccupancyChange(roomId, payload),
+  getByRoom: (roomId) => rooms.getOccupancyRequests(roomId),
+  approve: (requestId) => rooms.approveOccupancyRequest(requestId),
+  reject: (requestId, reason) => rooms.rejectOccupancyRequest(requestId, reason),
+};
+
 export default {
   request,
   getToken,
@@ -408,6 +480,7 @@ export default {
   auth,
   properties,
   rooms,
+  occupancyRequests,
   tenant,
   invoices,
   notifications,

@@ -1,9 +1,10 @@
-﻿/*
+/*
  * Copyright (c) 2026 tro. Contributors
  * SPDX-License-Identifier: MIT
  */
 
-import React, { useState } from 'react';
+import React, { useState, useEffect } from 'react';
+import { createPortal } from 'react-dom';
 import { useToast } from '../context/ToastContext';
 import { auth as authApi } from '../services/api';
 import { Lock, Eye, EyeOff, KeyRound, CheckCircle2, AlertCircle, X, ShieldCheck } from 'lucide-react';
@@ -21,6 +22,22 @@ export default function ChangePasswordModal({ isOpen, onClose }) {
 
   const [submitting, setSubmitting] = useState(false);
   const [errorMsg, setErrorMsg] = useState(null);
+
+  // Lock body scroll and listen for Escape key
+  useEffect(() => {
+    if (isOpen) {
+      const prevOverflow = document.body.style.overflow;
+      document.body.style.overflow = 'hidden';
+      const handleKeyDown = (e) => {
+        if (e.key === 'Escape' && !submitting) onClose?.();
+      };
+      window.addEventListener('keydown', handleKeyDown);
+      return () => {
+        document.body.style.overflow = prevOverflow;
+        window.removeEventListener('keydown', handleKeyDown);
+      };
+    }
+  }, [isOpen, submitting, onClose]);
 
   if (!isOpen) return null;
 
@@ -74,9 +91,12 @@ export default function ChangePasswordModal({ isOpen, onClose }) {
     onClose?.();
   };
 
-  return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-slate-900/60 backdrop-blur-sm animate-fadeIn">
-      <div className="bg-white rounded-3xl max-w-md w-full p-6 sm:p-7 space-y-5 shadow-2xl border border-slate-200 animate-scaleIn">
+  const modalContent = (
+    <div className="fixed inset-0 z-50 overflow-y-auto bg-slate-900/60 backdrop-blur-sm flex items-center justify-center p-3 sm:p-4 overscroll-contain animate-fadeIn">
+      {/* Backdrop click to close */}
+      <div className="fixed inset-0" onClick={handleClose} aria-hidden="true" />
+
+      <div className="relative z-10 my-auto bg-white rounded-3xl max-w-md w-full p-6 sm:p-7 space-y-5 shadow-2xl border border-slate-200 animate-scaleIn">
         {/* Header */}
         <div className="flex items-center justify-between border-b border-slate-100 pb-3">
           <div className="flex items-center gap-2.5">
@@ -113,24 +133,28 @@ export default function ChangePasswordModal({ isOpen, onClose }) {
         <form onSubmit={handleSubmit} className="space-y-4 text-left">
           {/* Mật khẩu hiện tại */}
           <div>
-            <label className="block text-xs font-bold text-slate-700 uppercase tracking-wider mb-1">
+            <label className="block text-xs font-bold text-slate-700 mb-1">
               Mật khẩu hiện tại <span className="text-red-500">*</span>
             </label>
             <div className="relative">
-              <Lock className="w-4 h-4 text-slate-400 absolute left-3.5 top-1/2 -translate-y-1/2 pointer-events-none" />
+              <div className="absolute inset-y-0 left-0 pl-3 flex items-center pointer-events-none text-slate-400">
+                <Lock className="w-4 h-4" />
+              </div>
               <input
                 type={showCurrentPassword ? 'text' : 'password'}
-                required
                 value={currentPassword}
                 onChange={(e) => setCurrentPassword(e.target.value)}
-                placeholder="Nhập mật khẩu đang sử dụng"
-                className="w-full min-h-[44px] pl-10 pr-12 py-2.5 bg-slate-50 border border-slate-200 rounded-xl text-sm focus:bg-white focus:outline-none focus:ring-2 focus:ring-primary-500 transition-all text-slate-900"
+                placeholder="Nhập mật khẩu đang sử dụng..."
+                disabled={submitting}
+                className="w-full pl-9 pr-10 py-2.5 text-xs sm:text-sm rounded-xl border border-slate-200 focus:outline-none focus:ring-2 focus:ring-primary-500/20 focus:border-primary-500 transition-colors disabled:bg-slate-50"
+                autoFocus
               />
               <button
                 type="button"
-                onClick={() => setShowCurrentPassword((p) => !p)}
-                className="absolute right-0 top-0 bottom-0 px-3.5 flex items-center justify-center min-w-[44px] text-slate-400 hover:text-slate-700 transition-colors"
-                title={showCurrentPassword ? 'Ẩn' : 'Hiện'}
+                onClick={() => setShowCurrentPassword(!showCurrentPassword)}
+                tabIndex={-1}
+                className="absolute inset-y-0 right-0 pr-3 flex items-center text-slate-400 hover:text-slate-600 focus:outline-none"
+                aria-label={showCurrentPassword ? 'Ẩn mật khẩu' : 'Hiển thị mật khẩu'}
               >
                 {showCurrentPassword ? <EyeOff className="w-4 h-4" /> : <Eye className="w-4 h-4" />}
               </button>
@@ -139,62 +163,72 @@ export default function ChangePasswordModal({ isOpen, onClose }) {
 
           {/* Mật khẩu mới */}
           <div>
-            <label className="block text-xs font-bold text-slate-700 uppercase tracking-wider mb-1">
-              Mật khẩu mới <span className="text-red-500">*</span>
+            <label className="block text-xs font-bold text-slate-700 mb-1">
+              Mật khẩu mới (tối thiểu 6 ký tự) <span className="text-red-500">*</span>
             </label>
             <div className="relative">
-              <Lock className="w-4 h-4 text-slate-400 absolute left-3.5 top-1/2 -translate-y-1/2 pointer-events-none" />
+              <div className="absolute inset-y-0 left-0 pl-3 flex items-center pointer-events-none text-slate-400">
+                <Lock className="w-4 h-4" />
+              </div>
               <input
                 type={showNewPassword ? 'text' : 'password'}
-                required
                 value={newPassword}
                 onChange={(e) => setNewPassword(e.target.value)}
-                placeholder="Tối thiểu 6 ký tự"
-                className="w-full min-h-[44px] pl-10 pr-12 py-2.5 bg-slate-50 border border-slate-200 rounded-xl text-sm focus:bg-white focus:outline-none focus:ring-2 focus:ring-primary-500 transition-all text-slate-900"
-              />
-              <button
-                type="button"
-                onClick={() => setShowNewPassword((p) => !p)}
-                className="absolute right-0 top-0 bottom-0 px-3.5 flex items-center justify-center min-w-[44px] text-slate-400 hover:text-slate-700 transition-colors"
-                title={showNewPassword ? 'Ẩn' : 'Hiện'}
-              >
-                {showNewPassword ? <EyeOff className="w-4 h-4" /> : <Eye className="w-4 h-4" />}
-              </button>
-            </div>
-            {newPassword.length > 0 && newPassword.length < 6 && (
-              <p className="mt-1 text-[11px] font-medium text-amber-600 flex items-center gap-1">
-                <AlertCircle className="w-3.5 h-3.5" />
-                <span>Mật khẩu phải có ít nhất 6 ký tự</span>
-              </p>
-            )}
-          </div>
-
-          {/* Xác nhận mật khẩu mới (Realtime Feedback) */}
-          <div>
-            <label className="block text-xs font-bold text-slate-700 uppercase tracking-wider mb-1">
-              Nhập lại mật khẩu mới <span className="text-red-500">*</span>
-            </label>
-            <div className="relative">
-              <Lock className="w-4 h-4 text-slate-400 absolute left-3.5 top-1/2 -translate-y-1/2 pointer-events-none" />
-              <input
-                type={showConfirmPassword ? 'text' : 'password'}
-                required
-                value={confirmPassword}
-                onChange={(e) => setConfirmPassword(e.target.value)}
-                placeholder="Nhập lại chính xác mật khẩu mới"
-                className={`w-full min-h-[44px] pl-10 pr-12 py-2.5 rounded-xl text-sm transition-all focus:outline-none focus:ring-2 ${
-                  !hasConfirm
-                    ? 'bg-slate-50 border border-slate-200 focus:bg-white focus:ring-primary-500 text-slate-900'
-                    : isMatch
-                    ? 'bg-emerald-50/30 border border-emerald-400 focus:bg-white focus:ring-emerald-500 text-slate-900'
-                    : 'bg-red-50/30 border border-red-400 focus:bg-white focus:ring-red-500 text-slate-900'
+                placeholder="Tối thiểu 6 ký tự..."
+                disabled={submitting}
+                className={`w-full pl-9 pr-10 py-2.5 text-xs sm:text-sm rounded-xl border focus:outline-none focus:ring-2 transition-colors disabled:bg-slate-50 ${
+                  newPassword.length > 0 && !isLengthValid
+                    ? 'border-red-300 focus:ring-red-500/20 focus:border-red-500'
+                    : 'border-slate-200 focus:ring-primary-500/20 focus:border-primary-500'
                 }`}
               />
               <button
                 type="button"
-                onClick={() => setShowConfirmPassword((p) => !p)}
-                className="absolute right-0 top-0 bottom-0 px-3.5 flex items-center justify-center min-w-[44px] text-slate-400 hover:text-slate-700 transition-colors"
-                title={showConfirmPassword ? 'Ẩn' : 'Hiện'}
+                onClick={() => setShowNewPassword(!showNewPassword)}
+                tabIndex={-1}
+                className="absolute inset-y-0 right-0 pr-3 flex items-center text-slate-400 hover:text-slate-600 focus:outline-none"
+                aria-label={showNewPassword ? 'Ẩn mật khẩu' : 'Hiển thị mật khẩu'}
+              >
+                {showNewPassword ? <EyeOff className="w-4 h-4" /> : <Eye className="w-4 h-4" />}
+              </button>
+            </div>
+            {newPassword.length > 0 && !isLengthValid && (
+              <p className="mt-1 text-[11px] font-semibold text-red-500 flex items-center gap-1 animate-fadeIn">
+                <AlertCircle className="w-3.5 h-3.5 flex-shrink-0" />
+                <span>Mật khẩu phải có từ 6 ký tự trở lên</span>
+              </p>
+            )}
+          </div>
+
+          {/* Nhập lại mật khẩu mới */}
+          <div>
+            <label className="block text-xs font-bold text-slate-700 mb-1">
+              Xác nhận mật khẩu mới <span className="text-red-500">*</span>
+            </label>
+            <div className="relative">
+              <div className="absolute inset-y-0 left-0 pl-3 flex items-center pointer-events-none text-slate-400">
+                <Lock className="w-4 h-4" />
+              </div>
+              <input
+                type={showConfirmPassword ? 'text' : 'password'}
+                value={confirmPassword}
+                onChange={(e) => setConfirmPassword(e.target.value)}
+                placeholder="Nhập lại mật khẩu mới..."
+                disabled={submitting}
+                className={`w-full pl-9 pr-10 py-2.5 text-xs sm:text-sm rounded-xl border focus:outline-none focus:ring-2 transition-colors disabled:bg-slate-50 ${
+                  hasConfirm
+                    ? isMatch
+                      ? 'border-emerald-400 focus:ring-emerald-500/20 focus:border-emerald-500'
+                      : 'border-red-400 focus:ring-red-500/20 focus:border-red-500'
+                    : 'border-slate-200 focus:ring-primary-500/20 focus:border-primary-500'
+                }`}
+              />
+              <button
+                type="button"
+                onClick={() => setShowConfirmPassword(!showConfirmPassword)}
+                tabIndex={-1}
+                className="absolute inset-y-0 right-0 pr-3 flex items-center text-slate-400 hover:text-slate-600 focus:outline-none"
+                aria-label={showConfirmPassword ? 'Ẩn mật khẩu' : 'Hiển thị mật khẩu'}
               >
                 {showConfirmPassword ? <EyeOff className="w-4 h-4" /> : <Eye className="w-4 h-4" />}
               </button>
@@ -236,4 +270,8 @@ export default function ChangePasswordModal({ isOpen, onClose }) {
       </div>
     </div>
   );
+
+  return typeof document !== 'undefined'
+    ? createPortal(modalContent, document.body)
+    : modalContent;
 }

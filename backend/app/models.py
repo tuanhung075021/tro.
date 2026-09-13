@@ -140,6 +140,13 @@ class SystemConfig(SQLModel, table=True):
     water_env_fee_rate: float = Field(default=0.10)
     tariff_version: str = Field(default="QD-1279-2023")
     tariff_updated_at: Optional[datetime] = Field(default=None)
+    fallback_tier_number: int = Field(default=3)
+    fallback_flat_price: Optional[float] = Field(default=None)
+    legal_basis_elec: str = Field(default="QĐ 1279/QĐ-BCT & TT 60/2025/TT-BCT")
+    legal_basis_vat: str = Field(default="Nghị quyết 204/2025/QH15")
+    compliance_decree: str = Field(default="Nghị định 104/2022/NĐ-CP & NĐ 17/2022/NĐ-CP")
+    penalty_text: str = Field(default="20.000.000 đ đến 30.000.000 đ")
+    tier3_rule_note: str = Field(default="Khoản 4 Điều 10 Thông tư 60/2025/TT-BCT")
 
     def get_tiers(self) -> List[Dict[str, Any]]:
         """Parse and return tiers as a Python list of dictionaries."""
@@ -185,10 +192,21 @@ class SystemConfig(SQLModel, table=True):
             )
             for t in tiers_data
         ]
+        # Calculate dynamic fallback price when quota is absent
+        if self.fallback_flat_price is not None:
+            effective_fallback_price = Decimal(str(self.fallback_flat_price))
+        else:
+            fb_num = int(self.fallback_tier_number or 3)
+            matching_tier = next((t for t in tiers if t.tier_number == fb_num), None)
+            if matching_tier:
+                effective_fallback_price = matching_tier.unit_price
+            else:
+                effective_fallback_price = Decimal(str(self.electricity_tier3_price))
+
         return ElectricityConfig(
             tiers=tiers,
             vat_rate=Decimal(str(self.electricity_vat_rate)),
-            tier3_price=Decimal(str(self.electricity_tier3_price)),
+            tier3_price=effective_fallback_price,
         )
 
     def to_water_config(self) -> Any:
@@ -355,3 +373,35 @@ class TariffChangeLog(SQLModel, table=True):
     tariff_version: str
     snapshot_json: str
     note: Optional[str] = Field(default=None)
+
+
+class OccupancyChangeRequest(SQLModel, table=True):
+    """Dual-approval occupancy change request initiated by tenant or landlord."""
+    __tablename__ = "occupancychangerequest"
+
+    id: Optional[int] = Field(default=None, primary_key=True)
+    room_id: int = Field(foreign_key="room.id")
+    requested_by_role: str = Field(default="tenant")  # "tenant" | "landlord"
+    requested_by_id: int = Field(foreign_key="user.id")
+    old_people_count: int = Field(default=1)
+    new_people_count: int = Field(default=1)
+    effective_date: str  # YYYY-MM-DD
+    note: Optional[str] = Field(default=None)
+    status: str = Field(default="pending")  # "pending" | "approved" | "rejected"
+    reviewed_by_id: Optional[int] = Field(default=None)
+    reviewed_at: Optional[datetime] = Field(default=None)
+    reject_reason: Optional[str] = Field(default=None)
+    created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
+
+
+class RoomOccupancyLog(SQLModel, table=True):
+    """Historical record of approved occupant changes for prorated quota calculations."""
+    __tablename__ = "roomoccupancylog"
+
+    id: Optional[int] = Field(default=None, primary_key=True)
+    room_id: int = Field(foreign_key="room.id")
+    old_count: int = Field(default=1)
+    new_count: int = Field(default=1)
+    effective_date: str  # YYYY-MM-DD
+    approved_by_id: int = Field(foreign_key="user.id")
+    created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))

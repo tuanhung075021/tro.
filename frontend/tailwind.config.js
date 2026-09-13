@@ -62,6 +62,8 @@ export default {
       animation: {
         fadeIn: 'fadeIn 0.2s ease-out forwards',
         scaleIn: 'scaleIn 0.2s ease-out forwards',
+        'fade-in': 'fadeIn 0.2s ease-out forwards',
+        'scale-in': 'scaleIn 0.2s ease-out forwards',
       },
     },
   },

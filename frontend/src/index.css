@@ -44,6 +44,74 @@
     animation: scaleIn 0.2s ease-out forwards;
   }
 
+  @keyframes floatSlow {
+    0%, 100% { transform: translateY(0px); }
+    50% { transform: translateY(-8px); }
+  }
+
+  @keyframes floatReverse {
+    0%, 100% { transform: translateY(0px); }
+    50% { transform: translateY(8px); }
+  }
+
+  @keyframes pulseSoft {
+    0%, 100% { opacity: 1; transform: scale(1); }
+    50% { opacity: 0.6; transform: scale(0.96); }
+  }
+
+  @keyframes softGlow {
+    0%, 100% { box-shadow: 0 4px 20px -2px rgba(16, 185, 129, 0.15); }
+    50% { box-shadow: 0 8px 30px 2px rgba(16, 185, 129, 0.28); }
+  }
+
+  @keyframes gentleShimmer {
+    0% { background-position: -200% 0; }
+    100% { background-position: 200% 0; }
+  }
+
+  @keyframes splineFlow {
+    0% { stroke-dashoffset: 200; }
+    100% { stroke-dashoffset: 0; }
+  }
+
+  .animate-float-slow {
+    animation: floatSlow 6s ease-in-out infinite;
+  }
+
+  .animate-float-reverse {
+    animation: floatReverse 7s ease-in-out infinite;
+  }
+
+  .animate-pulse-soft {
+    animation: pulseSoft 3s ease-in-out infinite;
+  }
+
+  .animate-soft-glow {
+    animation: softGlow 4s ease-in-out infinite;
+  }
+
+  .animate-gentle-shimmer {
+    background: linear-gradient(90deg, rgba(255,255,255,0) 0%, rgba(255,255,255,0.6) 50%, rgba(255,255,255,0) 100%);
+    background-size: 200% 100%;
+    animation: gentleShimmer 3.5s infinite;
+  }
+
+  .animate-spline-flow {
+    stroke-dasharray: 8 6;
+    animation: splineFlow 20s linear infinite;
+  }
+
+  /* 3D Perspective Utilities for FinTech Cards */
+  .perspective-1000 {
+    perspective: 1000px;
+  }
+  .preserve-3d {
+    transform-style: preserve-3d;
+  }
+  .backface-hidden {
+    backface-visibility: hidden;
+  }
+
   /* Custom FOSS Scrollbar Utilities */
   .scrollbar-thin {
     scrollbar-width: thin;

@@ -44,6 +44,7 @@ from .security import (
     get_password_hash,
     verify_password,
 )
+from .websocket_manager import ws_manager
 
 USERNAME_REGEX = r"^[a-zA-Z0-9_]{3,30}$"
 USERNAME_INVALID_MSG = "Tên đăng nhập chỉ được chứa ký tự chữ và số, không chứa ký tự đặc biệt"
@@ -257,6 +258,16 @@ def register(
                     )
                     session.add(approval_req)
                     session.commit()
+                    ws_manager.sync_broadcast_to_role(
+                        "root_admin",
+                        "NEW_ADMIN_REQUEST",
+                        {
+                            "id": approval_req.id,
+                            "user_id": user.id,
+                            "username": user.username,
+                            "full_name": user.full_name,
+                        },
+                    )
             except Exception:
                 session.rollback()
                 raise
@@ -326,6 +337,18 @@ def register(
             session.add(room)
             session.commit()
             session.refresh(room)
+            prop = session.get(Property, room.property_id)
+            if prop:
+                ws_manager.sync_send_to_user(
+                    prop.landlord_id,
+                    "TENANT_JOINED",
+                    {
+                        "room_id": room.id,
+                        "room_number": room.room_number,
+                        "tenant_id": user.id,
+                        "tenant_name": user.full_name or user.username,
+                    },
+                )
     except Exception:
         session.rollback()
         raise

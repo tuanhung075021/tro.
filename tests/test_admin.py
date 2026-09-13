@@ -967,5 +967,202 @@ class TestAdminSystem(unittest.TestCase):
             self.assertEqual(len(keys_after), 1)
 
 
+    # ========================================================================
+    # 9. Dynamic Legal Decrees & Fallback Tier Mechanism Tests
+    # ========================================================================
+
+    def test_public_get_config_without_token(self) -> None:
+        """GET /api/v1/config is publicly accessible without token and returns legal basis fields."""
+        with Session(self.engine) as session:
+            resp = self.client.get("/api/v1/config", session=session)
+            self.assertEqual(resp.status_code, 200)
+            data = resp.json()
+            self.assertEqual(data["tariff_version"], "QD-1279-2023")
+            self.assertEqual(data["fallback_tier_number"], 3)
+            self.assertIn("1279", data["legal_basis_elec"])
+            self.assertIn("204", data["legal_basis_vat"])
+            self.assertIn("104", data["compliance_decree"])
+            self.assertIn("20.000.000", data["penalty_text"])
+
+    def test_admin_update_dynamic_legal_and_fallback_tier(self) -> None:
+        """Admin updates legal basis texts, fallback tier (Bậc 4), water VAT, and env fee."""
+        with Session(self.engine) as session:
+            admin_u, admin_tok = self._create_user(session, "legal_admin", role="admin")
+
+            valid_tiers = [
+                {"tier_name": "Bậc 1", "min_kwh": 0, "max_kwh": 50, "unit_price": 2000.0},
+                {"tier_name": "Bậc 2", "min_kwh": 51, "max_kwh": 100, "unit_price": 2100.0},
+                {"tier_name": "Bậc 3", "min_kwh": 101, "max_kwh": 200, "unit_price": 2400.0},
+                {"tier_name": "Bậc 4", "min_kwh": 201, "max_kwh": 300, "unit_price": 3000.0},
+                {"tier_name": "Bậc 5", "min_kwh": 301, "max_kwh": 400, "unit_price": 3400.0},
+                {"tier_name": "Bậc 6", "min_kwh": 401, "max_kwh": None, "unit_price": 3500.0},
+            ]
+
+            payload = {
+                "electricity_tiers": valid_tiers,
+                "vat_rate": 0.10,
+                "water_rate": 9500.0,
+                "water_vat_rate": 0.08,
+                "water_env_fee_rate": 0.15,
+                "fallback_tier_number": 4,
+                "legal_basis_elec": "Quyết định Mới 2026",
+                "legal_basis_vat": "Nghị quyết Thuế 2026",
+                "compliance_decree": "Nghị định Xử phạt Mới",
+                "penalty_text": "30 - 50 triệu đồng",
+                "tier3_rule_note": "Thông tư Mới 2026",
+                "tariff_version": "QD-NEW-2026",
+                "note": "Cập nhật chính sách toàn diện",
+            }
+
+            resp = self.client.put(
+                "/api/v1/admin/tariff",
+                headers=self._auth_headers(admin_tok),
+                json=payload,
+                session=session,
+            )
+            self.assertEqual(resp.status_code, 200)
+            data = resp.json()
+            self.assertEqual(data["tariff_version"], "QD-NEW-2026")
+            self.assertEqual(data["fallback_tier_number"], 4)
+            self.assertEqual(data["water_vat_rate"], 0.08)
+            self.assertEqual(data["water_env_fee_rate"], 0.15)
+            self.assertEqual(data["legal_basis_elec"], "Quyết định Mới 2026")
+            self.assertEqual(data["legal_basis_vat"], "Nghị quyết Thuế 2026")
+            self.assertEqual(data["compliance_decree"], "Nghị định Xử phạt Mới")
+            self.assertEqual(data["penalty_text"], "30 - 50 triệu đồng")
+
+            # Check DB SystemConfig
+            cfg = session.get(SystemConfig, 1)
+            self.assertEqual(cfg.fallback_tier_number, 4)
+            self.assertEqual(cfg.compliance_decree, "Nghị định Xử phạt Mới")
+            self.assertEqual(cfg.penalty_text, "30 - 50 triệu đồng")
+
+    def test_invoice_calculation_uses_configured_fallback_tier(self) -> None:
+        """When room has no quota, electricity is calculated using the configured fallback tier price."""
+        with Session(self.engine) as session:
+            admin_u, admin_tok = self._create_user(session, "fb_admin", role="admin")
+            landlord, l_token = self._create_user(session, "fb_landlord", role="landlord")
+
+            # 1. Admin configures fallback tier = 4 (price 3000.0)
+            tiers = [
+                {"tier_name": "Bậc 1", "min_kwh": 0, "max_kwh": 50, "unit_price": 2000.0},
+                {"tier_name": "Bậc 2", "min_kwh": 51, "max_kwh": 100, "unit_price": 2100.0},
+                {"tier_name": "Bậc 3", "min_kwh": 101, "max_kwh": 200, "unit_price": 2400.0},
+                {"tier_name": "Bậc 4", "min_kwh": 201, "max_kwh": 300, "unit_price": 3000.0},
+                {"tier_name": "Bậc 5", "min_kwh": 301, "max_kwh": 400, "unit_price": 3400.0},
+                {"tier_name": "Bậc 6", "min_kwh": 401, "max_kwh": None, "unit_price": 3500.0},
+            ]
+            self.client.put(
+                "/api/v1/admin/tariff",
+                headers=self._auth_headers(admin_tok),
+                json={
+                    "electricity_tiers": tiers,
+                    "vat_rate": 0.08,
+                    "water_rate": 8500.0,
+                    "fallback_tier_number": 4,
+                },
+                session=session,
+            )
+
+            # 2. Landlord creates room with 0 people (no registered quota)
+            p_res = self.client.post(
+                "/api/v1/properties",
+                json={"name": "Khu Tro Fallback"},
+                headers=self._auth_headers(l_token),
+                session=session,
+            )
+            prop_id = p_res.json()["id"]
+            r_res = self.client.post(
+                f"/api/v1/properties/{prop_id}/rooms",
+                json={"room_number": "101", "current_people_count": 0},
+                headers=self._auth_headers(l_token),
+                session=session,
+            )
+            room_id = r_res.json()["id"]
+
+            # 3. Calculate invoice for 100 kWh without quota
+            inv_res = self.client.post(
+                f"/api/v1/rooms/{room_id}/invoices/calculate",
+                json={
+                    "month_year": "2026-09",
+                    "elec_start": 0.0,
+                    "elec_end": 100.0,
+                    "water_start": 0.0,
+                    "water_end": 0.0,
+                    "has_registered_quota": False,
+                },
+                headers=self._auth_headers(l_token),
+                session=session,
+            )
+            self.assertEqual(inv_res.status_code, 201)
+            inv_data = inv_res.json()
+            # 100 kWh * 3000 đ/kWh = 300.000 đ pre-tax + 8% VAT (24.000) = 324.000 đ
+            self.assertEqual(inv_data["elec_amount"], 324000.0)
+
+    def test_change_user_role_4_roles(self) -> None:
+        """PUT /api/v1/admin/users/{user_id}/role supports assigning tenant, landlord, admin, root_admin."""
+        with Session(self.engine) as session:
+            root1, root1_tok = self._create_user(session, "root_boss1", role="root_admin")
+            target_user, _ = self._create_user(session, "target_bob", role="admin")
+
+            # 1. Change target_bob from admin to landlord
+            res = self.client.put(
+                f"/api/v1/admin/users/{target_user.id}/role",
+                headers=self._auth_headers(root1_tok),
+                json={"role": "landlord"},
+                session=session,
+            )
+            self.assertEqual(res.status_code, 200)
+            self.assertEqual(res.json()["role"], "landlord")
+            session.refresh(target_user)
+            self.assertEqual(target_user.role, "landlord")
+
+            # 2. Change target_bob from landlord to tenant
+            res = self.client.put(
+                f"/api/v1/admin/users/{target_user.id}/role",
+                headers=self._auth_headers(root1_tok),
+                json={"role": "tenant"},
+                session=session,
+            )
+            self.assertEqual(res.status_code, 200)
+            self.assertEqual(res.json()["role"], "tenant")
+            session.refresh(target_user)
+            self.assertEqual(target_user.role, "tenant")
+
+            # 3. Change target_bob from tenant to root_admin
+            res = self.client.put(
+                f"/api/v1/admin/users/{target_user.id}/role",
+                headers=self._auth_headers(root1_tok),
+                json={"role": "root_admin"},
+                session=session,
+            )
+            self.assertEqual(res.status_code, 200)
+            self.assertEqual(res.json()["role"], "root_admin")
+            session.refresh(target_user)
+            self.assertEqual(target_user.role, "root_admin")
+
+            # 4. Now that 2 root admins exist, demote target_bob to admin
+            res = self.client.put(
+                f"/api/v1/admin/users/{target_user.id}/role",
+                headers=self._auth_headers(root1_tok),
+                json={"role": "admin"},
+                session=session,
+            )
+            self.assertEqual(res.status_code, 200)
+            self.assertEqual(res.json()["role"], "admin")
+            session.refresh(target_user)
+            self.assertEqual(target_user.role, "admin")
+
+            # 5. Attempt to demote sole root_boss1 -> fails with 400
+            res = self.client.put(
+                f"/api/v1/admin/users/{root1.id}/role",
+                headers=self._auth_headers(root1_tok),
+                json={"role": "tenant"},
+                session=session,
+            )
+            self.assertEqual(res.status_code, 400)
+            self.assertIn("Không thể hạ quyền Root Admin duy nhất của hệ thống", res.json()["detail"])
+
+
 if __name__ == "__main__":
     unittest.main()

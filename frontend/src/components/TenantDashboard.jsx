@@ -7,6 +7,7 @@ import React, { useState, useEffect, useCallback } from 'react';
 import { useAuth } from '../context/AuthContext';
 import { useToast } from '../context/ToastContext';
 import { rooms as roomApi } from '../services/api';
+import { useRealtimeEvent } from '../context/WebSocketContext';
 import {
   Building2,
   Home,
@@ -29,6 +30,9 @@ import {
   RefreshCw,
   Printer,
   Loader2,
+  Lock,
+  Clock,
+  Edit3,
 } from 'lucide-react';
 
 export default function TenantDashboard({ onViewPublicInvoice }) {
@@ -48,6 +52,40 @@ export default function TenantDashboard({ onViewPublicInvoice }) {
   const [inviteCodeInput, setInviteCodeInput] = useState('');
   const [joining, setJoining] = useState(false);
   const [joinError, setJoinError] = useState(null);
+
+  // Dual-approval Occupancy Change State
+  const [highlightRoomId, setHighlightRoomId] = useState(null);
+  const [occupancyRequests, setOccupancyRequests] = useState([]);
+  const [loadingRequests, setLoadingRequests] = useState(false);
+  const [showOccupancyModal, setShowOccupancyModal] = useState(false);
+  const [occupancyForm, setOccupancyForm] = useState({
+    new_people_count: 1,
+    effective_date: new Date().toISOString().split('T')[0],
+    note: '',
+    password: '',
+  });
+  const [occupancySubmitting, setOccupancySubmitting] = useState(false);
+  const [occupancyError, setOccupancyError] = useState(null);
+  const [rejectModalReq, setRejectModalReq] = useState(null);
+  const [rejectReason, setRejectReason] = useState('');
+  const [rejecting, setRejecting] = useState(false);
+
+  // Fetch occupancy requests for room
+  const fetchOccupancyRequests = useCallback(async (roomId) => {
+    if (!roomId) {
+      setOccupancyRequests([]);
+      return;
+    }
+    setLoadingRequests(true);
+    try {
+      const reqs = await roomApi.getOccupancyRequests(roomId);
+      setOccupancyRequests(reqs || []);
+    } catch (err) {
+      console.error('Error fetching occupancy requests:', err);
+    } finally {
+      setLoadingRequests(false);
+    }
+  }, []);
 
   // Fetch invoices for a given room
   const fetchInvoices = useCallback(async (roomId) => {
@@ -84,29 +122,172 @@ export default function TenantDashboard({ onViewPublicInvoice }) {
           const match = prev ? rooms.find((r) => r.id === prev.id) : null;
           const current = match || rooms[0];
           fetchInvoices(current.id);
+          fetchOccupancyRequests(current.id);
           return current;
         });
       } else {
         setSelectedRoom(null);
         setInvoicesList([]);
+        setOccupancyRequests([]);
       }
     } catch (err) {
       setError(err.message || 'Không thể tải thông tin phòng trọ.');
       setMyRooms([]);
       setSelectedRoom(null);
       setInvoicesList([]);
+      setOccupancyRequests([]);
     } finally {
       setLoadingRooms(false);
     }
-  }, [fetchInvoices]);
+  }, [fetchInvoices, fetchOccupancyRequests]);
 
   useEffect(() => {
     fetchMyRooms();
   }, [fetchMyRooms]);
 
+  // Handle focus_room event from notification clicks
+  useEffect(() => {
+    const handleFocusRoom = (e) => {
+      const { roomId } = e.detail || {};
+      if (!roomId) return;
+      const targetRoom = myRooms.find((r) => r.id === roomId);
+      if (targetRoom) {
+        setSelectedRoom(targetRoom);
+        fetchInvoices(targetRoom.id);
+        fetchOccupancyRequests(targetRoom.id);
+      }
+      setHighlightRoomId(roomId);
+      setTimeout(() => {
+        const el = document.getElementById(`tenant-room-card-${roomId}`);
+        if (el) {
+          el.scrollIntoView({ behavior: 'smooth', block: 'center' });
+        }
+      }, 250);
+      setTimeout(() => setHighlightRoomId(null), 4000);
+    };
+    window.addEventListener('tro:focus_room', handleFocusRoom);
+    return () => window.removeEventListener('tro:focus_room', handleFocusRoom);
+  }, [myRooms, fetchInvoices, fetchOccupancyRequests]);
+
+  // Realtime WebSocket listeners
+  useRealtimeEvent('INVOICE_CREATED', () => {
+    toast.info('Chủ trọ vừa phát hành hóa đơn mới cho phòng của bạn!');
+    if (selectedRoom?.id) {
+      fetchInvoices(selectedRoom.id);
+    }
+  });
+
+  useRealtimeEvent('INVOICE_UPDATED', () => {
+    if (selectedRoom?.id) {
+      fetchInvoices(selectedRoom.id);
+    }
+  });
+
+  useRealtimeEvent('ROOM_ASSIGNED', () => {
+    toast.success('Bạn đã được gán vào phòng trọ!');
+    fetchMyRooms();
+  });
+
+  useRealtimeEvent('TENANT_REMOVED', () => {
+    toast.warning('Bạn đã rời khỏi phòng trọ.');
+    fetchMyRooms();
+  });
+
+  useRealtimeEvent('QUOTA_REQUEST_CREATED', (data) => {
+    toast.info('Có đề xuất thay đổi số người định mức phòng!');
+    if (selectedRoom?.id) fetchOccupancyRequests(selectedRoom.id);
+  });
+
+  useRealtimeEvent('QUOTA_REQUEST_APPROVED', (data) => {
+    toast.success(`Đề xuất đổi số người (${data?.new_count} người) đã được phê duyệt thành công!`);
+    fetchMyRooms();
+    if (selectedRoom?.id) fetchOccupancyRequests(selectedRoom.id);
+  });
+
+  useRealtimeEvent('QUOTA_REQUEST_REJECTED', (data) => {
+    toast.warning(`Đề xuất đổi số người đã bị từ chối: ${data?.reject_reason || 'Không có lý do'}`);
+    if (selectedRoom?.id) fetchOccupancyRequests(selectedRoom.id);
+  });
+
+  useRealtimeEvent('ROOM_DELETED', (data) => {
+    if (selectedRoom?.id === data?.room_id) {
+      toast.warning(`Phòng ${data?.room_number || ''} đã bị xóa.`);
+      fetchMyRooms();
+    }
+  });
+
+  useRealtimeEvent('TARIFF_UPDATED', (data) => {
+    toast.info(`Biểu giá điện nước nhà nước vừa được cập nhật (${data?.tariff_version || ''})!`);
+  });
+
   const handleSelectRoom = (room) => {
     setSelectedRoom(room);
     fetchInvoices(room.id);
+    fetchOccupancyRequests(room.id);
+  };
+
+  const handleOpenOccupancyModal = () => {
+    if (!selectedRoom) return;
+    setOccupancyForm({
+      new_people_count: selectedRoom.current_people_count || 1,
+      effective_date: new Date().toISOString().split('T')[0],
+      note: '',
+      password: '',
+    });
+    setOccupancyError(null);
+    setShowOccupancyModal(true);
+  };
+
+  const handleSubmitOccupancyRequest = async (e) => {
+    e.preventDefault();
+    if (!occupancyForm.password) {
+      setOccupancyError('Vui lòng nhập mật khẩu tài khoản cá nhân để xác thực.');
+      return;
+    }
+    setOccupancySubmitting(true);
+    setOccupancyError(null);
+    try {
+      await roomApi.requestOccupancyChange(selectedRoom.id, {
+        new_people_count: parseInt(occupancyForm.new_people_count, 10),
+        effective_date: occupancyForm.effective_date,
+        note: occupancyForm.note || null,
+        password: occupancyForm.password,
+      });
+      toast.success('Yêu cầu đổi số người đã được gửi đến chủ trọ để xác thực kép!');
+      setShowOccupancyModal(false);
+      fetchOccupancyRequests(selectedRoom.id);
+    } catch (err) {
+      setOccupancyError(err.message || 'Không thể tạo yêu cầu. Vui lòng kiểm tra lại mật khẩu.');
+    } finally {
+      setOccupancySubmitting(false);
+    }
+  };
+
+  const handleApproveRequest = async (reqId) => {
+    try {
+      await roomApi.approveOccupancyRequest(reqId);
+      toast.success('Đã đồng ý phê duyệt số người mới cho phòng!');
+      fetchMyRooms();
+      if (selectedRoom?.id) fetchOccupancyRequests(selectedRoom.id);
+    } catch (err) {
+      toast.error(err.message || 'Không thể phê duyệt yêu cầu.');
+    }
+  };
+
+  const handleRejectRequest = async () => {
+    if (!rejectModalReq) return;
+    setRejecting(true);
+    try {
+      await roomApi.rejectOccupancyRequest(rejectModalReq.id, rejectReason);
+      toast.info('Đã từ chối đề xuất đổi số người.');
+      setRejectModalReq(null);
+      setRejectReason('');
+      if (selectedRoom?.id) fetchOccupancyRequests(selectedRoom.id);
+    } catch (err) {
+      toast.error(err.message || 'Không thể từ chối yêu cầu.');
+    } finally {
+      setRejecting(false);
+    }
   };
 
   const handleJoinRoom = async (e) => {
@@ -139,9 +320,9 @@ export default function TenantDashboard({ onViewPublicInvoice }) {
   };
 
   return (
-    <div className="space-y-8">
+    <div className="space-y-4 sm:space-y-8">
       {/* Clean SaaS Header */}
-      <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4 pb-4 border-b border-slate-200">
+      <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 sm:gap-4 pb-3 sm:pb-4 border-b border-slate-200">
         <div>
           <h1 className="text-2xl sm:text-3xl font-black text-slate-900 tracking-tight">
             Phòng trọ của tôi
@@ -314,7 +495,12 @@ export default function TenantDashboard({ onViewPublicInvoice }) {
 
           {/* Active Room Overview Card */}
           {selectedRoom && (
-            <div className="bg-white rounded-2xl sm:rounded-3xl border border-slate-200/80 p-4 sm:p-7 shadow-sm">
+            <div
+              id={`tenant-room-card-${selectedRoom.id}`}
+              className={`bg-white rounded-2xl sm:rounded-3xl border border-slate-200/80 p-3.5 sm:p-7 shadow-sm transition-all duration-500 ${
+                highlightRoomId === selectedRoom.id ? 'ring-4 ring-primary-500 shadow-xl' : ''
+              }`}
+            >
               <div className="flex flex-col lg:flex-row lg:items-center justify-between gap-6">
                 {/* Left: Property & Room Identity */}
                 <div className="space-y-3">
@@ -347,15 +533,27 @@ export default function TenantDashboard({ onViewPublicInvoice }) {
                 {/* Right: Landlord & Quota Details */}
                 <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 text-xs">
                   {/* Quota */}
-                  <div className="p-3.5 rounded-2xl bg-slate-50 border border-slate-200/80 space-y-1">
-                    <div className="flex items-center gap-1.5 text-slate-500">
-                      <Users className="w-3.5 h-3.5 text-primary-600" />
-                      <span className="font-semibold">Định mức sử dụng:</span>
+                  <div className="p-3.5 rounded-2xl bg-slate-50 border border-slate-200/80 space-y-1.5">
+                    <div className="flex items-center justify-between">
+                      <div className="flex items-center gap-1.5 text-slate-500">
+                        <Users className="w-3.5 h-3.5 text-primary-600" />
+                        <span className="font-semibold">Định mức sử dụng:</span>
+                      </div>
                     </div>
-                    <p className="text-base font-black text-slate-900">
-                      {selectedRoom.current_people_count} người
-                    </p>
-                    <p className="text-[11px] text-slate-400">Dùng tính bậc thang lũy tiến</p>
+                    <div className="flex items-baseline justify-between">
+                      <p className="text-base font-black text-slate-900">
+                        {selectedRoom.current_people_count} người
+                      </p>
+                      <button
+                        onClick={handleOpenOccupancyModal}
+                        className="text-[11px] font-bold text-primary-700 bg-primary-50 hover:bg-primary-100 active:scale-95 px-2.5 py-1.5 rounded-xl border border-primary-200 transition-all flex items-center gap-1 min-h-[32px] shadow-xs"
+                        title="Cấu hình số người ở thực tế (Yêu cầu xác thực kép bảo mật)"
+                      >
+                        <ShieldCheck className="w-3.5 h-3.5 text-primary-600" />
+                        <span>Cấu hình số người</span>
+                      </button>
+                    </div>
+                    <p className="text-[11px] text-slate-400">Dùng tính bậc thang lũy tiến (4 người = 1 hộ định mức)</p>
                   </div>
 
                   {/* Landlord Contact */}
@@ -374,12 +572,67 @@ export default function TenantDashboard({ onViewPublicInvoice }) {
                   </div>
                 </div>
               </div>
+
+              {/* Dual-approval Pending Request Banner */}
+              {(() => {
+                const pendingReq = occupancyRequests.find((r) => r.status === 'pending');
+                if (!pendingReq) return null;
+                if (pendingReq.requested_by_role === 'tenant') {
+                  return (
+                    <div className="mt-4 p-4 rounded-2xl bg-amber-50/90 border border-amber-200 flex flex-col sm:flex-row sm:items-center justify-between gap-3 text-xs">
+                      <div className="flex items-center gap-2.5 text-amber-900">
+                        <Clock className="w-4 h-4 text-amber-600 flex-shrink-0" />
+                        <div>
+                          <p className="font-bold">Yêu cầu thay đổi số người đang chờ chủ trọ duyệt:</p>
+                          <p className="text-amber-800 mt-0.5">
+                            Đổi thành <strong>{pendingReq.new_people_count} người</strong> (áp dụng từ ngày {pendingReq.effective_date}){pendingReq.note ? ` • Ghi chú: ${pendingReq.note}` : ''}
+                          </p>
+                        </div>
+                      </div>
+                      <span className="px-3 py-1 bg-amber-200/80 text-amber-900 text-xs font-bold rounded-full self-start sm:self-auto">
+                        Đang chờ xét duyệt
+                      </span>
+                    </div>
+                  );
+                }
+                return (
+                  <div className="mt-4 p-4 rounded-2xl bg-primary-50 border border-primary-200 flex flex-col sm:flex-row sm:items-center justify-between gap-4 text-xs">
+                    <div className="flex items-start sm:items-center gap-2.5 text-primary-950">
+                      <ShieldAlert className="w-5 h-5 text-primary-600 flex-shrink-0 mt-0.5 sm:mt-0" />
+                      <div>
+                        <p className="font-bold text-sm">Chủ trọ đề xuất thay đổi số người định mức:</p>
+                        <p className="text-slate-600 mt-0.5">
+                          Đổi từ <strong>{pendingReq.old_people_count} người</strong> thành <strong>{pendingReq.new_people_count} người</strong> (áp dụng từ ngày {pendingReq.effective_date}){pendingReq.note ? ` • Ghi chú: ${pendingReq.note}` : ''}.
+                        </p>
+                      </div>
+                    </div>
+                    <div className="flex items-center gap-2 self-end sm:self-auto">
+                      <button
+                        onClick={() => handleApproveRequest(pendingReq.id)}
+                        className="min-h-[38px] px-3.5 py-1.5 bg-emerald-600 hover:bg-emerald-700 active:scale-95 text-white font-bold rounded-xl text-xs flex items-center gap-1.5 shadow-sm transition-all"
+                      >
+                        <Check className="w-4 h-4" />
+                        <span>Đồng ý duyệt</span>
+                      </button>
+                      <button
+                        onClick={() => {
+                          setRejectModalReq(pendingReq);
+                          setRejectReason('');
+                        }}
+                        className="min-h-[38px] px-3.5 py-1.5 bg-white hover:bg-red-50 text-red-600 border border-red-200 font-semibold rounded-xl text-xs transition-colors"
+                      >
+                        <span>Từ chối</span>
+                      </button>
+                    </div>
+                  </div>
+                );
+              })()}
             </div>
           )}
 
           {/* Invoices List */}
-          <div className="bg-white rounded-2xl sm:rounded-3xl border border-slate-200/80 p-4 sm:p-8 space-y-6 shadow-sm">
-            <div className="flex items-center justify-between pb-4 border-b border-slate-100">
+          <div className="bg-white rounded-2xl sm:rounded-3xl border border-slate-200/80 p-3.5 sm:p-8 space-y-4 sm:space-y-6 shadow-sm">
+            <div className="flex items-center justify-between pb-3 sm:pb-4 border-b border-slate-100">
               <div>
                 <h2 className="text-lg font-bold text-slate-900 flex items-center gap-2">
                   <FileText className="w-5 h-5 text-primary-600" />
@@ -533,9 +786,10 @@ export default function TenantDashboard({ onViewPublicInvoice }) {
 
       {/* MODAL: Tham gia phòng khác */}
       {showJoinModal && (
-        <div className="fixed inset-0 z-50 flex items-end sm:items-center justify-center p-0 sm:p-4 bg-slate-900/60 backdrop-blur-sm animate-fadeIn">
-          <div className="bg-white rounded-t-3xl sm:rounded-3xl p-5 sm:p-8 max-w-md w-full shadow-2xl border border-slate-200 animate-scaleIn">
-            <h3 className="text-xl font-bold text-slate-900 mb-1">Tham gia phòng trọ mới</h3>
+        <div className="fixed inset-0 z-50 flex items-end sm:items-center justify-center p-0 sm:p-4 bg-slate-900/60 backdrop-blur-sm animate-fade-in">
+          <div className="bg-white rounded-t-3xl sm:rounded-3xl p-4 sm:p-8 max-w-md w-full shadow-2xl border border-slate-200 animate-scale-in max-h-[92vh] sm:max-h-[90vh] overflow-y-auto">
+            <div className="w-10 h-1 bg-slate-300 rounded-full mx-auto mb-3 sm:hidden" />
+            <h3 className="text-lg sm:text-xl font-bold text-slate-900 mb-1">Tham gia phòng trọ mới</h3>
             <p className="text-xs text-slate-500 mb-4">
               Nhập mã mời phòng do chủ trọ cung cấp để liên kết tài khoản của bạn vào phòng.
             </p>
@@ -581,6 +835,171 @@ export default function TenantDashboard({ onViewPublicInvoice }) {
                 </button>
               </div>
             </form>
+          </div>
+        </div>
+      )}
+
+      {/* MODAL: Cấu hình số người định mức (Yêu cầu xác thực kép) */}
+      {showOccupancyModal && selectedRoom && (
+        <div className="fixed inset-0 z-50 flex items-end sm:items-center justify-center p-0 sm:p-4 bg-slate-900/60 backdrop-blur-sm animate-fade-in">
+          <div className="bg-white rounded-t-3xl sm:rounded-3xl p-4 sm:p-8 max-w-md w-full shadow-2xl border border-slate-200 space-y-4 sm:space-y-5 animate-scale-in max-h-[92vh] sm:max-h-[90vh] overflow-y-auto">
+            <div className="w-10 h-1 bg-slate-300 rounded-full mx-auto mb-3 sm:hidden" />
+            <div className="flex items-center justify-between pb-3 border-b border-slate-100">
+              <div className="flex items-center gap-2.5">
+                <div className="w-10 h-10 rounded-2xl bg-primary-50 text-primary-600 flex items-center justify-center font-bold">
+                  <Users className="w-5 h-5" />
+                </div>
+                <div>
+                  <h3 className="text-base font-black text-slate-900">Cấu hình số người định mức</h3>
+                  <p className="text-xs text-slate-500">Phòng {selectedRoom.room_number} • Xác thực kép</p>
+                </div>
+              </div>
+              <button
+                type="button"
+                onClick={() => setShowOccupancyModal(false)}
+                className="text-slate-400 hover:text-slate-600 min-h-[44px] min-w-[44px] flex items-center justify-center rounded-xl"
+              >
+                ✕
+              </button>
+            </div>
+
+            {occupancyError && (
+              <div className="p-3 bg-red-50 border border-red-200 rounded-xl text-xs text-red-700 flex items-center gap-2">
+                <AlertTriangle className="w-4 h-4 flex-shrink-0" />
+                <span>{occupancyError}</span>
+              </div>
+            )}
+
+            <form onSubmit={handleSubmitOccupancyRequest} className="space-y-4">
+              <div>
+                <label className="block text-xs font-bold text-slate-700 mb-1">
+                  Số người hiện tại:
+                </label>
+                <div className="px-3.5 py-2.5 bg-slate-100 rounded-xl text-xs font-bold text-slate-700">
+                  {selectedRoom.current_people_count} người
+                </div>
+              </div>
+
+              <div>
+                <label className="block text-xs font-bold text-slate-700 mb-1">
+                  Số người mới thực tế ở phòng: <span className="text-red-500">*</span>
+                </label>
+                <input
+                  type="number"
+                  min="1"
+                  max="50"
+                  required
+                  value={occupancyForm.new_people_count}
+                  onChange={(e) => setOccupancyForm({ ...occupancyForm, new_people_count: e.target.value })}
+                  className="w-full px-3.5 py-2.5 bg-slate-50 border border-slate-300 rounded-xl text-sm font-bold text-slate-900 focus:bg-white focus:outline-none focus:ring-2 focus:ring-primary-500"
+                />
+              </div>
+
+              <div>
+                <label className="block text-xs font-bold text-slate-700 mb-1">
+                  Ngày bắt đầu áp dụng: <span className="text-red-500">*</span>
+                </label>
+                <input
+                  type="date"
+                  required
+                  value={occupancyForm.effective_date}
+                  onChange={(e) => setOccupancyForm({ ...occupancyForm, effective_date: e.target.value })}
+                  className="w-full px-3.5 py-2.5 bg-slate-50 border border-slate-300 rounded-xl text-sm text-slate-900 focus:bg-white focus:outline-none focus:ring-2 focus:ring-primary-500"
+                />
+                <p className="text-[11px] text-slate-400 mt-1">
+                  Nếu thay đổi giữa tháng, tiền điện sẽ tự động phân bổ định mức theo tỷ lệ số ngày thực tế trong tháng (Thông tư 60/2025/TT-BCT).
+                </p>
+              </div>
+
+              <div>
+                <label className="block text-xs font-bold text-slate-700 mb-1">
+                  Lý do / Ghi chú (tùy chọn):
+                </label>
+                <textarea
+                  rows="2"
+                  value={occupancyForm.note}
+                  onChange={(e) => setOccupancyForm({ ...occupancyForm, note: e.target.value })}
+                  placeholder="Ví dụ: Bạn mới chuyển vào từ giữa tháng..."
+                  className="w-full px-3.5 py-2 bg-slate-50 border border-slate-300 rounded-xl text-xs text-slate-900 focus:bg-white focus:outline-none focus:ring-2 focus:ring-primary-500"
+                />
+              </div>
+
+              <div className="pt-2 border-t border-slate-100">
+                <label className="block text-xs font-bold text-slate-800 mb-1 flex items-center gap-1.5">
+                  <Lock className="w-3.5 h-3.5 text-primary-600" />
+                  <span>Mật khẩu tài khoản cá nhân: <span className="text-red-500">*</span></span>
+                </label>
+                <input
+                  type="password"
+                  required
+                  placeholder="Nhập mật khẩu để xác thực yêu cầu"
+                  value={occupancyForm.password}
+                  onChange={(e) => setOccupancyForm({ ...occupancyForm, password: e.target.value })}
+                  className="w-full px-3.5 py-2.5 bg-slate-50 border border-slate-300 rounded-xl text-sm focus:bg-white focus:outline-none focus:ring-2 focus:ring-primary-500"
+                />
+              </div>
+
+              <div className="flex items-center justify-end gap-2.5 pt-3">
+                <button
+                  type="button"
+                  onClick={() => setShowOccupancyModal(false)}
+                  className="min-h-[44px] px-4 py-2.5 text-xs font-semibold text-slate-600 hover:bg-slate-100 rounded-xl transition-colors"
+                >
+                  Hủy
+                </button>
+                <button
+                  type="submit"
+                  disabled={occupancySubmitting}
+                  className="min-h-[44px] px-5 py-2.5 bg-primary-600 hover:bg-primary-700 active:scale-95 text-white text-xs font-bold rounded-xl shadow-sm transition-all disabled:opacity-50 flex items-center gap-1.5"
+                >
+                  {occupancySubmitting && <Loader2 className="w-3.5 h-3.5 animate-spin" />}
+                  <span>Gửi yêu cầu xác thực kép</span>
+                </button>
+              </div>
+            </form>
+          </div>
+        </div>
+      )}
+
+      {/* MODAL: Từ chối đề xuất đổi số người */}
+      {rejectModalReq && (
+        <div className="fixed inset-0 z-50 flex items-end sm:items-center justify-center p-0 sm:p-4 bg-slate-900/60 backdrop-blur-sm animate-fade-in">
+          <div className="bg-white rounded-t-3xl sm:rounded-3xl p-4 sm:p-6 max-w-sm w-full shadow-2xl border border-slate-200 space-y-4 animate-scale-in max-h-[92vh] sm:max-h-[90vh] overflow-y-auto">
+            <div className="w-10 h-1 bg-slate-300 rounded-full mx-auto mb-3 sm:hidden" />
+            <h3 className="text-sm font-black text-slate-900">Từ chối đề xuất đổi số người</h3>
+            <p className="text-xs text-slate-500">
+              Bạn có chắc muốn từ chối đề xuất đổi sang {rejectModalReq.new_people_count} người từ chủ trọ?
+            </p>
+            <div>
+              <label className="block text-xs font-semibold text-slate-700 mb-1">
+                Lý do từ chối (tùy chọn):
+              </label>
+              <textarea
+                rows="2"
+                value={rejectReason}
+                onChange={(e) => setRejectReason(e.target.value)}
+                placeholder="Nhập lý do..."
+                className="w-full px-3 py-2 text-xs bg-slate-50 border border-slate-300 rounded-xl focus:bg-white focus:outline-none focus:ring-2 focus:ring-primary-500"
+              />
+            </div>
+            <div className="flex items-center justify-end gap-2">
+              <button
+                type="button"
+                onClick={() => setRejectModalReq(null)}
+                className="min-h-[44px] px-3.5 py-2 text-xs font-semibold text-slate-600 hover:bg-slate-100 rounded-xl"
+              >
+                Hủy
+              </button>
+              <button
+                type="button"
+                disabled={rejecting}
+                onClick={handleRejectRequest}
+                className="min-h-[44px] px-4 py-2 bg-red-600 hover:bg-red-700 active:scale-95 text-white text-xs font-bold rounded-xl disabled:opacity-50 flex items-center gap-1"
+              >
+                {rejecting && <Loader2 className="w-3.5 h-3.5 animate-spin" />}
+                <span>Xác nhận từ chối</span>
+              </button>
+            </div>
           </div>
         </div>
       )}

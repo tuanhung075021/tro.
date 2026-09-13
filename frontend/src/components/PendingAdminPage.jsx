@@ -3,15 +3,35 @@
  * SPDX-License-Identifier: MIT
  */
 
-import React, { useState } from 'react';
+import React, { useState, useEffect } from 'react';
 import { useAuth } from '../context/AuthContext';
 import { useToast } from '../context/ToastContext';
+import { useRealtimeEvent } from '../context/WebSocketContext';
 import { Clock, RefreshCw, LogOut, ShieldAlert, User, Phone, Calendar, Info } from 'lucide-react';
 
 export default function PendingAdminPage() {
   const { user, refreshUser, logout } = useAuth();
   const { toast } = useToast();
   const [refreshing, setRefreshing] = useState(false);
+
+  // Realtime instant approval handling (< 100ms)
+  useRealtimeEvent('ADMIN_APPROVED', async () => {
+    toast.success('🎉 Chúc mừng! Yêu cầu của bạn đã được Root Admin phê duyệt!');
+    await refreshUser();
+  });
+
+  useRealtimeEvent('ADMIN_REJECTED', async (data) => {
+    toast.warning(`Yêu cầu quản trị viên bị từ chối${data?.reason ? `: ${data.reason}` : '.'}`);
+    await refreshUser();
+  });
+
+  // Defensive fallback polling every 15s in case connection drops
+  useEffect(() => {
+    const timer = setInterval(() => {
+      refreshUser();
+    }, 15000);
+    return () => clearInterval(timer);
+  }, [refreshUser]);
 
   const handleRefresh = async () => {
     setRefreshing(true);

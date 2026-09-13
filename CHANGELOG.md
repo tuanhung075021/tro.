@@ -14,10 +14,33 @@ Tất cả những thay đổi đáng chú ý của dự án **tro.** sẽ đư�
 ### Added
 - ci: Thiết lập GitHub Actions tự động kiểm tra License Compliance và Unit Tests trên mỗi commit.
 
-### Planned
-- Xây dựng Core Engine tính toán điện bậc thang và định mức theo Thông tư 60/2025/TT-BCT và Quyết định 1279/QĐ-BCT.
-- Phát triển RESTful API backend bằng FastAPI phục vụ quản lý phòng, cơ sở và tính tiền điện nước.
-- Xây dựng giao diện web React trực quan hóa hóa đơn và đối chiếu tiền điện nước.
+## [1.0.0] - 2026-09-13
+
+### Added
+- **Cơ chế Cấu hình số người định mức xác thực kép (Dual-Approval Occupancy Change)**:
+  - Thay thế nút "Báo sai định mức" bằng quy trình đề xuất và phê duyệt chéo giữa Người thuê và Chủ trọ.
+  - Bắt buộc nhập mật khẩu tài khoản cá nhân để ký số đề xuất (`password verification`), ngăn chặn tự duyệt trái phép.
+  - Lưu vết lịch sử biến động định mức trong bảng `RoomOccupancyLog`.
+- **Giải bài toán thay đổi số người giữa tháng theo Thông tư 60/2025/TT-BCT (Prorated)**:
+  - Tự động phân bổ định mức theo tỷ lệ số ngày thực tế trong chu kỳ hóa đơn khi có người chuyển vào/chuyển đi.
+  - Chi tiết phân bổ theo từng khoảng thời gian hiển thị minh bạch trong `breakdown_data["electricity"]["occupancy_prorated"]`.
+- **Quản lý Xóa phòng & Xóa khu trọ an toàn cho Chủ trọ**:
+  - Ràng buộc an toàn: Phòng phải trống (`vacant`) và khu trọ không còn khách thuê mới được phép xóa.
+  - Bắt buộc xác thực mật khẩu chủ trọ trước khi thực thi xóa, tránh thất thoát dữ liệu.
+- **Hệ thống Quản trị & Biểu giá nhà nước tập trung**:
+  - Cơ chế Easter Egg đăng ký Root Admin qua cú pháp bảo mật `username::secret_key`.
+  - Phân quyền 5 cấp: `root_admin`, `admin`, `pending_admin`, `landlord`, `tenant`.
+  - Quản lý và cập nhật biểu giá 6 bậc điện QĐ 1279, ghi nhận nhật ký `TariffChangeLog`, hỗ trợ xoay vòng Secret Key.
+- **Hệ thống Realtime WebSocket & In-App Notification trung tâm**:
+  - Tích hợp `WebSocketManager` phát sóng tức thời các sự kiện hóa đơn, định mức, biểu giá.
+  - Trung tâm thông báo chuông Navbar hỗ trợ đầy đủ các trạng thái `pending`, `approved`, `rejected` (kèm lý do từ chối).
+  - Tự động điều hướng, cuộn mượt và highlight card phòng 4 giây khi bấm vào thông báo.
+- **Đại tu toàn diện Giao diện Mobile-First Responsive**:
+  - Chuyển hơn 13 modal trên hệ thống sang chuẩn **Mobile Bottom Sheet** (trượt từ đáy, bo góc `rounded-t-3xl`, drag handle bar, `max-h-[92vh]`).
+  - Tiết chế padding/margin thừa, căn chỉnh dropdown thông báo chống tràn ngang (no horizontal overflow).
+  - Bảng 6 bậc điện và nước bọc trong `overflow-x-auto scrollbar-thin` có nhãn gợi ý cảm ứng `← Vuốt ngang để xem đầy đủ →`.
+- **Bộ Kiểm thử Đầy đủ 253 Tests**:
+  - Đạt **253/253 unit & integration tests PASS 100%**.
 
 ---
 

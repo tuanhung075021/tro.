@@ -2,6 +2,7 @@
 # SPDX-License-Identifier: MIT
 """RESTful API router for properties, rooms, meter readings, invoices, and dynamic pricing."""
 
+import calendar
 import json
 from datetime import datetime, timezone
 from decimal import Decimal
@@ -15,7 +16,7 @@ from .auth import (
     require_root_admin,
     require_tenant,
 )
-from .compat import APIRouter, Depends, HTTPException, Session, select, status
+from .compat import APIRouter, Depends, HTTPException, Query, Session, WebSocket, WebSocketDisconnect, select, status
 from .database import (
     decrypt_admin_secret,
     encrypt_admin_secret,
@@ -27,8 +28,10 @@ from .models import (
     AdminSecretKey,
     Invoice,
     MeterReading,
+    OccupancyChangeRequest,
     Property,
     Room,
+    RoomOccupancyLog,
     SystemConfig,
     TariffChangeLog,
     User,
@@ -36,12 +39,17 @@ from .models import (
 from .schemas import (
     AdminApprovalRequestOut,
     AdminRejectIn,
+    AdminRoleUpdateIn,
     AdminUserOut,
     AssignTenantRequest,
+    DeleteEntityIn,
     InvoiceCalculateRequest,
     InvoiceOut,
     MeterReadingCreate,
     MeterReadingOut,
+    OccupancyChangeRequestIn,
+    OccupancyChangeRequestOut,
+    OccupancyChangeReviewIn,
     PropertyCreate,
     PropertyOut,
     PropertyUpdate,
@@ -58,19 +66,71 @@ from .schemas import (
     TariffUpdateIn,
     TenantRoomOut,
 )
-from .security import verify_password
+from .security import decode_access_token, verify_password
+from .websocket_manager import ws_manager
 from .tariff_history import get_tariff_by_version
 from core.calculator import (
     calculate_consumption,
     calculate_dispute,
     calculate_electricity_tier3,
     calculate_electricity_tiered,
+    calculate_prorated_quota,
     calculate_quota,
     calculate_water,
 )
 from core.models import WaterPricingType
 
 router = APIRouter(prefix="/api/v1", tags=["api"])
+
+
+@router.websocket("/ws")
+async def websocket_endpoint(
+    websocket: WebSocket,
+    token: Optional[str] = Query(None),
+    session: Session = Depends(get_session),
+):
+    """Bidirectional WebSocket endpoint delivering real-time FOSS updates."""
+    if not token:
+        try:
+            await websocket.close(code=4001)
+        except Exception:
+            pass
+        return
+
+    payload = decode_access_token(token)
+    if not payload:
+        try:
+            await websocket.close(code=4002)
+        except Exception:
+            pass
+        return
+
+    username = payload.get("sub") or payload.get("username")
+    user = session.exec(select(User).where(User.username == username)).first()
+    if not user:
+        try:
+            await websocket.close(code=4003)
+        except Exception:
+            pass
+        return
+
+    await ws_manager.connect(websocket, user.id, user.role)
+    try:
+        await websocket.send_text(
+            json.dumps({
+                "type": "CONNECTED",
+                "data": {"user_id": user.id, "username": user.username, "role": user.role},
+                "timestamp": datetime.now(timezone.utc).isoformat(),
+            })
+        )
+        while True:
+            msg = await websocket.receive_text()
+            if msg == "ping":
+                await websocket.send_text("pong")
+    except WebSocketDisconnect:
+        await ws_manager.disconnect(websocket, user.id)
+    except Exception:
+        await ws_manager.disconnect(websocket, user.id)
 
 
 # ============================================================================
@@ -486,6 +546,12 @@ def assign_tenant_to_room(
     session.commit()
     session.refresh(room)
 
+    ws_manager.sync_send_to_user(
+        tenant.id,
+        "ROOM_ASSIGNED",
+        {"room_id": room.id, "room_number": room.room_number},
+    )
+
     return _enrich_room_out(room, session)
 
 
@@ -516,10 +582,16 @@ def remove_tenant_from_room(
                 detail=f"Room {room_id} does not belong to property {property_id}",
             )
 
+    old_tenant_id = room.tenant_id
     room.remove_tenant()
     session.add(room)
     session.commit()
     session.refresh(room)
+
+    if old_tenant_id:
+        ws_manager.sync_send_to_user(old_tenant_id, "TENANT_REMOVED", {"room_id": room.id})
+    ws_manager.sync_send_to_user(current_user.id, "ROOM_UPDATED", {"room_id": room.id})
+
     return _enrich_room_out(room, session)
 
 
@@ -552,7 +624,419 @@ def join_room(
     session.commit()
     session.refresh(room)
 
+    if room.property_id:
+        prop = session.get(Property, room.property_id)
+        if prop and prop.landlord_id:
+            ws_manager.sync_send_to_user(
+                prop.landlord_id,
+                "TENANT_JOINED",
+                {"room_id": room.id, "room_number": room.room_number, "tenant_name": current_user.full_name or current_user.username},
+            )
+
     return _enrich_room_out(room, session)
+
+
+# ============================================================================
+# Room & Property Deletion Endpoints (Khóa an toàn & Xác thực mật khẩu)
+# ============================================================================
+
+
+@router.delete("/rooms/{room_id}")
+@router.delete("/properties/{property_id}/rooms/{room_id}")
+@router.post("/rooms/{room_id}/delete")
+def delete_room(
+    room_id: int,
+    payload: DeleteEntityIn,
+    property_id: Optional[int] = None,
+    current_user: User = Depends(require_landlord),
+    session: Session = Depends(get_session),
+) -> Dict[str, Any]:
+    """Delete a vacant room after verifying landlord password."""
+    room, prop = _verify_room_landlord_access(room_id, current_user, session)
+    if property_id is not None:
+        try:
+            pid = int(property_id)
+        except (ValueError, TypeError):
+            pid = property_id
+        if room.property_id != pid:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=f"Phòng {room_id} không thuộc khu trọ {property_id}",
+            )
+
+    if not verify_password(payload.password, current_user.hashed_password):
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Mật khẩu xác thực không chính xác. Vui lòng thử lại.",
+        )
+
+    if room.tenant_id is not None or room.status == "active":
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Phòng đang có khách thuê, vui lòng gỡ khách thuê khỏi phòng trước khi xóa.",
+        )
+
+    prop_id = room.property_id
+    room_num = room.room_number
+
+    # Cascading cleanup for room
+    for inv in session.exec(select(Invoice).where(Invoice.room_id == room_id)).all():
+        session.delete(inv)
+    for mr in session.exec(select(MeterReading).where(MeterReading.room_id == room_id)).all():
+        session.delete(mr)
+    for ocr in session.exec(select(OccupancyChangeRequest).where(OccupancyChangeRequest.room_id == room_id)).all():
+        session.delete(ocr)
+    for rol in session.exec(select(RoomOccupancyLog).where(RoomOccupancyLog.room_id == room_id)).all():
+        session.delete(rol)
+
+    session.delete(room)
+    session.commit()
+
+    event_payload = {"room_id": room_id, "property_id": prop_id, "room_number": room_num}
+    ws_manager.sync_send_to_user(current_user.id, "ROOM_DELETED", event_payload)
+    ws_manager.sync_broadcast("ROOM_DELETED", event_payload)
+
+    return {"message": f"Phòng {room_num} đã được xóa thành công", "room_id": room_id}
+
+
+@router.delete("/properties/{id}")
+@router.post("/properties/{id}/delete")
+def delete_property(
+    id: int,
+    payload: DeleteEntityIn,
+    current_user: User = Depends(require_landlord),
+    session: Session = Depends(get_session),
+) -> Dict[str, Any]:
+    """Delete a property and all its empty rooms after verifying landlord password."""
+    prop = session.get(Property, id)
+    if not prop:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Khu trọ với id {id} không tồn tại",
+        )
+    if prop.landlord_id != current_user.id and not current_user.is_admin:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Bạn không có quyền xóa khu trọ này",
+        )
+
+    if not verify_password(payload.password, current_user.hashed_password):
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Mật khẩu xác thực không chính xác. Vui lòng thử lại.",
+        )
+
+    rooms = session.exec(select(Room).where(Room.property_id == id)).all()
+    occupied_rooms = [r.room_number for r in rooms if r.tenant_id is not None or r.status == "active"]
+    if occupied_rooms:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"Khu trọ còn phòng đang có khách thuê ({', '.join(occupied_rooms)}). Vui lòng hoàn tất trả phòng trước khi xóa khu trọ.",
+        )
+
+    # Cascading cleanup for all rooms and the property
+    for r in rooms:
+        for inv in session.exec(select(Invoice).where(Invoice.room_id == r.id)).all():
+            session.delete(inv)
+        for mr in session.exec(select(MeterReading).where(MeterReading.room_id == r.id)).all():
+            session.delete(mr)
+        for ocr in session.exec(select(OccupancyChangeRequest).where(OccupancyChangeRequest.room_id == r.id)).all():
+            session.delete(ocr)
+        for rol in session.exec(select(RoomOccupancyLog).where(RoomOccupancyLog.room_id == r.id)).all():
+            session.delete(rol)
+        session.delete(r)
+
+    prop_name = prop.name
+    session.delete(prop)
+    session.commit()
+
+    event_payload = {"property_id": id, "property_name": prop_name}
+    ws_manager.sync_send_to_user(current_user.id, "PROPERTY_DELETED", event_payload)
+    ws_manager.sync_broadcast("PROPERTY_DELETED", event_payload)
+
+    return {"message": f"Khu trọ '{prop_name}' đã được xóa thành công", "property_id": id}
+
+
+# ============================================================================
+# Occupancy Change & Dual-Approval Endpoints (Cấu hình số người định mức)
+# ============================================================================
+
+
+@router.post(
+    "/rooms/{room_id}/occupancy-requests",
+    response_model=OccupancyChangeRequestOut,
+    status_code=status.HTTP_201_CREATED,
+)
+def create_occupancy_request(
+    room_id: int,
+    req_data: OccupancyChangeRequestIn,
+    current_user: User = Depends(get_current_user),
+    session: Session = Depends(get_session),
+) -> OccupancyChangeRequestOut:
+    """Create a dual-approval occupancy change request requiring personal password confirmation."""
+    room = session.get(Room, room_id)
+    if not room:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Phòng với id {room_id} không tồn tại",
+        )
+
+    # Verify requester role & relation
+    is_tenant = (room.tenant_id == current_user.id)
+    is_landlord = False
+    prop = session.get(Property, room.property_id) if room.property_id else None
+    if prop and (prop.landlord_id == current_user.id or current_user.is_admin):
+        is_landlord = True
+
+    if not is_tenant and not is_landlord:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Bạn không có quyền yêu cầu thay đổi số người cho phòng này.",
+        )
+
+    # Verify password
+    if not verify_password(req_data.password, current_user.hashed_password):
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Mật khẩu xác thực không chính xác. Vui lòng thử lại.",
+        )
+
+    # Validate effective_date format YYYY-MM-DD
+    try:
+        parts = req_data.effective_date.strip().split("-")
+        if len(parts) != 3 or len(parts[0]) != 4 or len(parts[1]) != 2 or len(parts[2]) != 2:
+            raise ValueError()
+        datetime.strptime(req_data.effective_date.strip(), "%Y-%m-%d")
+    except Exception:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Ngày hiệu lực không hợp lệ. Định dạng phải là YYYY-MM-DD.",
+        )
+
+    req_role = "tenant" if is_tenant else "landlord"
+    new_req = OccupancyChangeRequest(
+        room_id=room.id,
+        requested_by_role=req_role,
+        requested_by_id=current_user.id,
+        old_people_count=room.current_people_count,
+        new_people_count=req_data.new_people_count,
+        effective_date=req_data.effective_date.strip(),
+        note=req_data.note.strip() if req_data.note else None,
+        status="pending",
+        created_at=datetime.now(timezone.utc),
+    )
+    session.add(new_req)
+    session.commit()
+    session.refresh(new_req)
+
+    # Notify counterparty via WebSocket
+    payload_data = {
+        "request_id": new_req.id,
+        "room_id": room.id,
+        "room_number": room.room_number,
+        "old_count": new_req.old_people_count,
+        "new_count": new_req.new_people_count,
+        "effective_date": new_req.effective_date,
+        "requested_by_role": req_role,
+        "requested_by_name": current_user.full_name or current_user.username,
+        "note": new_req.note,
+    }
+    if req_role == "tenant" and prop and prop.landlord_id:
+        ws_manager.sync_send_to_user(prop.landlord_id, "QUOTA_REQUEST_CREATED", payload_data)
+    elif req_role == "landlord" and room.tenant_id:
+        ws_manager.sync_send_to_user(room.tenant_id, "QUOTA_REQUEST_CREATED", payload_data)
+
+    out = OccupancyChangeRequestOut.model_validate(new_req)
+    out.requested_by_username = current_user.username
+    return out
+
+
+@router.get(
+    "/rooms/{room_id}/occupancy-requests",
+    response_model=List[OccupancyChangeRequestOut],
+)
+def get_room_occupancy_requests(
+    room_id: int,
+    current_user: User = Depends(get_current_user),
+    session: Session = Depends(get_session),
+) -> List[OccupancyChangeRequestOut]:
+    """Retrieve all occupancy change requests for a room."""
+    room, prop = _verify_room_read_access(room_id, current_user, session)
+    requests = session.exec(
+        select(OccupancyChangeRequest)
+        .where(OccupancyChangeRequest.room_id == room_id)
+        .order_by(OccupancyChangeRequest.id.desc())
+    ).all()
+
+    result = []
+    for r in requests:
+        user = session.get(User, r.requested_by_id)
+        item = OccupancyChangeRequestOut.model_validate(r)
+        item.requested_by_username = user.username if user else None
+        result.append(item)
+    return result
+
+
+@router.post(
+    "/occupancy-requests/{request_id}/approve",
+    response_model=OccupancyChangeRequestOut,
+)
+def approve_occupancy_request(
+    request_id: int,
+    current_user: User = Depends(get_current_user),
+    session: Session = Depends(get_session),
+) -> OccupancyChangeRequestOut:
+    """Dual-approve an occupancy change request (counterparty only)."""
+    req = session.get(OccupancyChangeRequest, request_id)
+    if not req:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Yêu cầu #{request_id} không tồn tại",
+        )
+    if req.status != "pending":
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"Yêu cầu này đã được xử lý (trạng thái: {req.status})",
+        )
+
+    room = session.get(Room, req.room_id)
+    if not room:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Phòng tương ứng không tồn tại",
+        )
+
+    prop = session.get(Property, room.property_id) if room.property_id else None
+
+    # Dual-approval enforcement:
+    # If tenant requested: Landlord/admin must approve
+    # If landlord requested: Room's tenant must approve
+    if req.requested_by_role == "tenant":
+        if not prop or (prop.landlord_id != current_user.id and not current_user.is_admin):
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="Chỉ chủ trọ mới có quyền phê duyệt yêu cầu từ người thuê.",
+            )
+    elif req.requested_by_role == "landlord":
+        if room.tenant_id != current_user.id and not current_user.is_admin:
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="Chỉ người thuê đang ở phòng này mới có quyền phê duyệt đề xuất từ chủ trọ.",
+            )
+
+    now = datetime.now(timezone.utc)
+    req.status = "approved"
+    req.reviewed_by_id = current_user.id
+    req.reviewed_at = now
+    session.add(req)
+
+    # Update room current_people_count
+    room.current_people_count = req.new_people_count
+    session.add(room)
+
+    # Record historical occupancy log
+    log_entry = RoomOccupancyLog(
+        room_id=room.id,
+        old_count=req.old_people_count,
+        new_count=req.new_people_count,
+        effective_date=req.effective_date,
+        approved_by_id=current_user.id,
+        created_at=now,
+    )
+    session.add(log_entry)
+
+    session.commit()
+    session.refresh(req)
+
+    payload_data = {
+        "request_id": req.id,
+        "room_id": room.id,
+        "room_number": room.room_number,
+        "new_count": req.new_people_count,
+        "effective_date": req.effective_date,
+        "approved_by_name": current_user.full_name or current_user.username,
+    }
+    if room.tenant_id:
+        ws_manager.sync_send_to_user(room.tenant_id, "QUOTA_REQUEST_APPROVED", payload_data)
+    if prop and prop.landlord_id:
+        ws_manager.sync_send_to_user(prop.landlord_id, "QUOTA_REQUEST_APPROVED", payload_data)
+
+    creator = session.get(User, req.requested_by_id)
+    out = OccupancyChangeRequestOut.model_validate(req)
+    out.requested_by_username = creator.username if creator else None
+    return out
+
+
+@router.post(
+    "/occupancy-requests/{request_id}/reject",
+    response_model=OccupancyChangeRequestOut,
+)
+def reject_occupancy_request(
+    request_id: int,
+    review_data: Optional[OccupancyChangeReviewIn] = None,
+    current_user: User = Depends(get_current_user),
+    session: Session = Depends(get_session),
+) -> OccupancyChangeRequestOut:
+    """Reject an occupancy change request (counterparty only)."""
+    req = session.get(OccupancyChangeRequest, request_id)
+    if not req:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Yêu cầu #{request_id} không tồn tại",
+        )
+    if req.status != "pending":
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"Yêu cầu này đã được xử lý (trạng thái: {req.status})",
+        )
+
+    room = session.get(Room, req.room_id)
+    if not room:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Phòng tương ứng không tồn tại",
+        )
+
+    prop = session.get(Property, room.property_id) if room.property_id else None
+
+    if req.requested_by_role == "tenant":
+        if not prop or (prop.landlord_id != current_user.id and not current_user.is_admin):
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="Chỉ chủ trọ mới có quyền từ chối yêu cầu từ người thuê.",
+            )
+    elif req.requested_by_role == "landlord":
+        if room.tenant_id != current_user.id and not current_user.is_admin:
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="Chỉ người thuê đang ở phòng này mới có quyền từ chối đề xuất từ chủ trọ.",
+            )
+
+    now = datetime.now(timezone.utc)
+    req.status = "rejected"
+    req.reviewed_by_id = current_user.id
+    req.reviewed_at = now
+    req.reject_reason = review_data.reject_reason.strip() if review_data and review_data.reject_reason else None
+    session.add(req)
+    session.commit()
+    session.refresh(req)
+
+    payload_data = {
+        "request_id": req.id,
+        "room_id": room.id,
+        "room_number": room.room_number,
+        "reject_reason": req.reject_reason,
+        "rejected_by_name": current_user.full_name or current_user.username,
+    }
+    if room.tenant_id:
+        ws_manager.sync_send_to_user(room.tenant_id, "QUOTA_REQUEST_REJECTED", payload_data)
+    if prop and prop.landlord_id:
+        ws_manager.sync_send_to_user(prop.landlord_id, "QUOTA_REQUEST_REJECTED", payload_data)
+
+    creator = session.get(User, req.requested_by_id)
+    out = OccupancyChangeRequestOut.model_validate(req)
+    out.requested_by_username = creator.username if creator else None
+    return out
 
 
 # ============================================================================
@@ -742,9 +1226,70 @@ def calculate_and_generate_invoice(
         if calc_data.people_count is not None:
             people_count = calc_data.people_count
 
+        prorated_info: Optional[Dict[str, Any]] = None
         if has_quota:
             p_count = people_count if people_count > 0 else 1
-            quota = calculate_quota(p_count)
+            # Check for mid-month occupancy logs in cleaned_month (YYYY-MM)
+            mid_month_logs = session.exec(
+                select(RoomOccupancyLog)
+                .where(RoomOccupancyLog.room_id == room_id)
+                .order_by(RoomOccupancyLog.effective_date.asc())
+            ).all()
+
+            month_logs = [l for l in mid_month_logs if l.effective_date.startswith(cleaned_month)]
+
+            if month_logs:
+                try:
+                    parts = cleaned_month.split("-")
+                    year = int(parts[0])
+                    month = int(parts[1])
+                    days_in_month = calendar.monthrange(year, month)[1]
+
+                    current_day = 1
+                    current_count = month_logs[0].old_count
+                    periods = []
+                    total_person_days = Decimal("0")
+
+                    for log in month_logs:
+                        log_day = int(log.effective_date.split("-")[2])
+                        log_day = max(1, min(days_in_month, log_day))
+                        if log_day > current_day:
+                            duration = log_day - current_day
+                            periods.append({
+                                "from_day": current_day,
+                                "to_day": log_day - 1,
+                                "days": duration,
+                                "people_count": current_count,
+                            })
+                            total_person_days += Decimal(str(duration)) * Decimal(str(current_count))
+                            current_day = log_day
+                        current_count = log.new_count
+
+                    if current_day <= days_in_month:
+                        duration = days_in_month - current_day + 1
+                        periods.append({
+                            "from_day": current_day,
+                            "to_day": days_in_month,
+                            "days": duration,
+                            "people_count": current_count,
+                        })
+                        total_person_days += Decimal(str(duration)) * Decimal(str(current_count))
+
+                    divisor = Decimal("4") * Decimal(str(days_in_month))
+                    quota = total_person_days / divisor
+
+                    prorated_info = {
+                        "is_prorated": True,
+                        "days_in_month": days_in_month,
+                        "total_person_days": float(total_person_days),
+                        "effective_quota": float(round(quota, 4)),
+                        "periods": periods,
+                    }
+                except Exception:
+                    quota = calculate_quota(p_count)
+            else:
+                quota = calculate_quota(p_count)
+
             elec_result = calculate_electricity_tiered(
                 consumption=elec_consumption,
                 quota=quota,
@@ -762,18 +1307,22 @@ def calculate_and_generate_invoice(
         elif water_cfg.pricing_type == WaterPricingType.PER_PERSON:
             water_usage = Decimal(str(people_count))
         else:
-            w_start = water_start if water_start is not None else 0.0
-            w_end = water_end if water_end is not None else 0.0
-            water_usage = calculate_consumption(w_start, w_end, max_meter=max_m)
+            max_m_w = Decimal(str(calc_data.max_meter if calc_data.max_meter is not None else 99999.0))
+            water_start_val = water_start if water_start is not None else 0.0
+            water_end_val = water_end if water_end is not None else 0.0
+            water_usage = calculate_consumption(water_start_val, water_end_val, max_meter=max_m_w)
 
-        water_result = calculate_water(usage=water_usage, config=water_cfg)
+        water_result = calculate_water(
+            usage=water_usage,
+            config=water_cfg,
+        )
 
         # 6. Statutory total & dispute calculation
         total_statutory = elec_result.total_amount + water_result.total_amount
         user_actual = (
             calc_data.actual_collected
             if calc_data.actual_collected is not None
-            else calc_data.actual_collected_amount
+            else getattr(calc_data, "actual_collected_amount", None)
         )
         if user_actual is not None:
             actual_collected = Decimal(str(user_actual))
@@ -816,10 +1365,16 @@ def calculate_and_generate_invoice(
             "water_start": float(water_start) if water_start is not None else 0.0,
             "water_end": float(water_end) if water_end is not None else 0.0,
         },
+        "tariff_version": getattr(sys_config, "tariff_version", "QD-1279-2023"),
+        "legal_basis_elec": getattr(sys_config, "legal_basis_elec", "QĐ 1279/QĐ-BCT & TT 60/2025/TT-BCT"),
+        "compliance_decree": getattr(sys_config, "compliance_decree", "Nghị định 104/2022/NĐ-CP & NĐ 17/2022/NĐ-CP"),
+        "penalty_text": getattr(sys_config, "penalty_text", "20.000.000 đ đến 30.000.000 đ"),
         "electricity": {
             "method": elec_result.method,
+            "fallback_tier_number": getattr(sys_config, "fallback_tier_number", 3),
             "consumption_kwh": float(elec_result.consumption_kwh),
             "quota": float(elec_result.quota),
+            "occupancy_prorated": prorated_info,
             "pre_tax_amount": float(elec_result.pre_tax_amount),
             "vat_amount": float(elec_result.vat_amount),
             "total_amount": float(elec_result.total_amount),
@@ -869,6 +1424,13 @@ def calculate_and_generate_invoice(
     session.commit()
     session.refresh(invoice)
 
+    if room and room.tenant_id:
+        ws_manager.sync_send_to_user(
+            room.tenant_id,
+            "INVOICE_UPDATED",
+            {"invoice_id": invoice.id, "room_id": room.id, "status": invoice.status},
+        )
+
     return InvoiceOut.model_validate(invoice)
 
 
@@ -891,6 +1453,25 @@ def publish_invoice(
     session.add(invoice)
     session.commit()
     session.refresh(invoice)
+
+    room = session.get(Room, invoice.room_id)
+    if room and room.tenant_id:
+        ws_manager.sync_send_to_user(
+            room.tenant_id,
+            "INVOICE_CREATED",
+            {
+                "invoice_id": invoice.id,
+                "room_id": room.id,
+                "month_year": invoice.month_year,
+                "total_amount": invoice.actual_collected_amount or invoice.total_statutory_amount,
+            },
+        )
+    ws_manager.sync_send_to_user(
+        current_user.id,
+        "INVOICE_UPDATED",
+        {"invoice_id": invoice.id, "room_id": invoice.room_id, "status": "published"},
+    )
+
     return InvoiceOut.model_validate(invoice)
 
 
@@ -973,10 +1554,13 @@ def get_public_invoice(
 
 @router.get("/config", response_model=SystemConfigOut)
 def get_system_config(
-    current_user: User = Depends(get_current_user),
     session: Session = Depends(get_session),
 ) -> SystemConfigOut:
-    """Retrieve active system pricing configuration (VAT, tiers, water rates)."""
+    """Retrieve active system pricing configuration (VAT, tiers, water rates, legal basis).
+
+    Accessible publicly without authentication so visitors on landing page, public invoice viewers,
+    and tenants can always inspect current statutory tariffs and legal decrees.
+    """
     config = session.get(SystemConfig, 1)
     if not config:
         config = session.exec(select(SystemConfig)).first()
@@ -1021,6 +1605,20 @@ def update_system_config(
         config.water_vat_rate = float(update_data.water_vat_rate)
     if update_data.water_env_fee_rate is not None:
         config.water_env_fee_rate = float(update_data.water_env_fee_rate)
+    if update_data.fallback_tier_number is not None:
+        config.fallback_tier_number = int(update_data.fallback_tier_number)
+    if update_data.fallback_flat_price is not None:
+        config.fallback_flat_price = float(update_data.fallback_flat_price)
+    if update_data.legal_basis_elec is not None:
+        config.legal_basis_elec = update_data.legal_basis_elec.strip()
+    if update_data.legal_basis_vat is not None:
+        config.legal_basis_vat = update_data.legal_basis_vat.strip()
+    if update_data.compliance_decree is not None:
+        config.compliance_decree = update_data.compliance_decree.strip()
+    if update_data.penalty_text is not None:
+        config.penalty_text = update_data.penalty_text.strip()
+    if update_data.tier3_rule_note is not None:
+        config.tier3_rule_note = update_data.tier3_rule_note.strip()
 
     session.add(config)
     session.commit()
@@ -1043,8 +1641,36 @@ def get_notifications(
     - Tenant: sees only published invoices for their rooms, newest first, max 20.
     - Landlord: sees all invoices (draft + published) for all their rooms, newest first, max 20.
       Each notification includes room_number and property_name for clarity.
+    - All roles: a synthetic tariff_updated notification is prepended when the statutory
+      tariff was updated within the last 7 days (no extra DB table required).
     """
-    notifs = []
+    notifs: List[Dict[str, Any]] = []
+
+    # --- Inject synthetic tariff_updated notification (no DB table needed) ---
+    # Visible to landlords and tenants for 7 days after each admin tariff update.
+    if current_user.is_landlord or current_user.is_tenant:
+        sys_config = session.get(SystemConfig, 1)
+        if not sys_config:
+            sys_config = session.exec(select(SystemConfig)).first()
+        if sys_config and sys_config.tariff_updated_at:
+            now_utc = datetime.now(timezone.utc)
+            updated_at = sys_config.tariff_updated_at
+            if updated_at.tzinfo is None:
+                updated_at = updated_at.replace(tzinfo=timezone.utc)
+            age_days = (now_utc - updated_at).total_seconds() / 86400
+            if age_days <= 7:
+                version = sys_config.tariff_version or "Phiên bản mới"
+                notifs.append({
+                    "id": f"tariff_{version}",
+                    "type": "tariff_updated",
+                    "title": f"Biểu giá hệ thống cập nhật — {version}",
+                    "message": (
+                        "Quản trị viên vừa cập nhật biểu giá điện nước. "
+                        "Kiểm tra lại để đảm bảo tính toán chính xác."
+                    ),
+                    "timestamp": updated_at.isoformat(),
+                    "read": False,
+                })
 
     if current_user.is_tenant:
         my_rooms = session.exec(
@@ -1079,6 +1705,50 @@ def get_notifications(
                     "invoice_id": inv.id,
                     "read": False,
                 })
+
+            # Occupancy Change Requests for Tenant
+            occ_reqs = session.exec(
+                select(OccupancyChangeRequest)
+                .where(OccupancyChangeRequest.room_id.in_(list(room_map.keys())))
+                .order_by(OccupancyChangeRequest.created_at.desc())
+            ).all()
+            for req in occ_reqs[:20]:
+                r = room_map.get(req.room_id)
+                room_label = f"Phòng {r.room_number}" if r else f"Phòng #{req.room_id}"
+                if req.status == "pending" and req.requested_by_role == "landlord":
+                    notifs.append({
+                        "id": f"occ_req_{req.id}",
+                        "type": "occupancy_request_pending",
+                        "title": f"Chủ trọ đề xuất đổi số người — {room_label}",
+                        "message": f"Chủ trọ đề xuất đổi sang {req.new_people_count} người (từ ngày {req.effective_date}). Bấm để xem và duyệt.",
+                        "timestamp": req.created_at.isoformat() if req.created_at else None,
+                        "room_id": req.room_id,
+                        "request_id": req.id,
+                        "read": False,
+                    })
+                elif req.status == "approved" and req.requested_by_id == current_user.id:
+                    notifs.append({
+                        "id": f"occ_appr_{req.id}",
+                        "type": "occupancy_request_approved",
+                        "title": f"Đổi số người thành công — {room_label}",
+                        "message": f"Đề xuất đổi sang {req.new_people_count} người đã được chủ trọ phê duyệt!",
+                        "timestamp": (req.reviewed_at or req.created_at).isoformat() if (req.reviewed_at or req.created_at) else None,
+                        "room_id": req.room_id,
+                        "request_id": req.id,
+                        "read": False,
+                    })
+                elif req.status == "rejected" and req.requested_by_id == current_user.id:
+                    reason_str = f": {req.reject_reason}" if req.reject_reason else ""
+                    notifs.append({
+                        "id": f"occ_rej_{req.id}",
+                        "type": "occupancy_request_rejected",
+                        "title": f"Đề xuất đổi số người bị từ chối — {room_label}",
+                        "message": f"Chủ trọ đã từ chối đổi sang {req.new_people_count} người{reason_str}.",
+                        "timestamp": (req.reviewed_at or req.created_at).isoformat() if (req.reviewed_at or req.created_at) else None,
+                        "room_id": req.room_id,
+                        "request_id": req.id,
+                        "read": False,
+                    })
 
     elif current_user.is_landlord:
         props = session.exec(
@@ -1120,7 +1790,56 @@ def get_notifications(
                         "read": False,
                     })
 
-    return notifs
+                # Occupancy Change Requests for Landlord
+                occ_reqs = session.exec(
+                    select(OccupancyChangeRequest)
+                    .where(OccupancyChangeRequest.room_id.in_(list(room_map.keys())))
+                    .order_by(OccupancyChangeRequest.created_at.desc())
+                ).all()
+                for req in occ_reqs[:20]:
+                    r = room_map.get(req.room_id)
+                    room_label = f"Phòng {r.room_number}" if r else f"Phòng #{req.room_id}"
+                    if req.status == "pending" and req.requested_by_role == "tenant":
+                        notifs.append({
+                            "id": f"occ_req_{req.id}",
+                            "type": "occupancy_request_pending",
+                            "title": f"Yêu cầu đổi số người — {room_label}",
+                            "message": f"Khách thuê yêu cầu đổi sang {req.new_people_count} người (từ ngày {req.effective_date}). Bấm để phê duyệt.",
+                            "timestamp": req.created_at.isoformat() if req.created_at else None,
+                            "room_id": req.room_id,
+                            "request_id": req.id,
+                            "read": False,
+                        })
+                    elif req.status == "approved" and req.requested_by_id == current_user.id:
+                        notifs.append({
+                            "id": f"occ_appr_{req.id}",
+                            "type": "occupancy_request_approved",
+                            "title": f"Đề xuất đổi số người đã duyệt — {room_label}",
+                            "message": f"Khách thuê đã phê duyệt đề xuất đổi sang {req.new_people_count} người!",
+                            "timestamp": (req.reviewed_at or req.created_at).isoformat() if (req.reviewed_at or req.created_at) else None,
+                            "room_id": req.room_id,
+                            "request_id": req.id,
+                            "read": False,
+                        })
+                    elif req.status == "rejected" and req.requested_by_id == current_user.id:
+                        reason_str = f": {req.reject_reason}" if req.reject_reason else ""
+                        notifs.append({
+                            "id": f"occ_rej_{req.id}",
+                            "type": "occupancy_request_rejected",
+                            "title": f"Đề xuất đổi số người bị từ chối — {room_label}",
+                            "message": f"Khách thuê đã từ chối đổi sang {req.new_people_count} người{reason_str}.",
+                            "timestamp": (req.reviewed_at or req.created_at).isoformat() if (req.reviewed_at or req.created_at) else None,
+                            "room_id": req.room_id,
+                            "request_id": req.id,
+                            "read": False,
+                        })
+
+    # Sort all notifications by timestamp descending (newest first)
+    notifs.sort(
+        key=lambda n: n.get("timestamp") or "",
+        reverse=True,
+    )
+    return notifs[:30]
 
 
 # ============================================================================
@@ -1195,6 +1914,19 @@ def approve_admin_request(
     session.commit()
     session.refresh(req)
 
+    if target_user:
+        ws_manager.update_user_role(target_user.id, "admin")
+        ws_manager.sync_send_to_user(
+            target_user.id,
+            "ADMIN_APPROVED",
+            {"user_id": target_user.id, "username": target_user.username, "role": "admin"},
+        )
+    ws_manager.sync_broadcast_to_roles(
+        ["admin", "root_admin"],
+        "ADMINS_UPDATED",
+        {"request_id": req.id, "status": "approved", "user_id": req.user_id},
+    )
+
     return AdminApprovalRequestOut(
         id=req.id,
         user_id=req.user_id,
@@ -1245,6 +1977,19 @@ def reject_admin_request(
     session.add(req)
     session.commit()
     session.refresh(req)
+
+    if target_user:
+        ws_manager.update_user_role(target_user.id, "tenant")
+        ws_manager.sync_send_to_user(
+            target_user.id,
+            "ADMIN_REJECTED",
+            {"user_id": target_user.id, "reject_reason": req.reject_reason, "role": "tenant"},
+        )
+    ws_manager.sync_broadcast_to_roles(
+        ["admin", "root_admin"],
+        "ADMINS_UPDATED",
+        {"request_id": req.id, "status": "rejected", "user_id": req.user_id},
+    )
 
     return AdminApprovalRequestOut(
         id=req.id,
@@ -1316,6 +2061,19 @@ def promote_admin(
     session.add(target)
     session.commit()
     session.refresh(target)
+
+    ws_manager.update_user_role(target.id, "root_admin")
+    ws_manager.sync_send_to_user(
+        target.id,
+        "ROLE_CHANGED",
+        {"user_id": target.id, "username": target.username, "role": "root_admin"},
+    )
+    ws_manager.sync_broadcast_to_roles(
+        ["admin", "root_admin"],
+        "ADMINS_UPDATED",
+        {"user_id": target.id, "role": "root_admin"},
+    )
+
     return AdminUserOut(
         id=target.id,
         username=target.username,
@@ -1356,6 +2114,71 @@ def demote_admin(
     session.add(target)
     session.commit()
     session.refresh(target)
+
+    ws_manager.update_user_role(target.id, "admin")
+    ws_manager.sync_send_to_user(
+        target.id,
+        "ROLE_CHANGED",
+        {"user_id": target.id, "username": target.username, "role": "admin"},
+    )
+    ws_manager.sync_broadcast_to_roles(
+        ["admin", "root_admin"],
+        "ADMINS_UPDATED",
+        {"user_id": target.id, "role": "admin"},
+    )
+
+    return AdminUserOut(
+        id=target.id,
+        username=target.username,
+        full_name=target.full_name,
+        role=target.role,
+        is_root_admin=target.is_root_admin,
+        created_at=target.created_at,
+    )
+
+
+@router.put("/admin/users/{user_id}/role", response_model=AdminUserOut)
+def change_user_role(
+    user_id: int,
+    payload: AdminRoleUpdateIn,
+    current_user: User = Depends(require_root_admin),
+    session: Session = Depends(get_session),
+) -> AdminUserOut:
+    """Assign any of the 4 roles (tenant, landlord, admin, root_admin) to a user (Root Admin only)."""
+    target = session.get(User, user_id)
+    if not target:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Không tìm thấy người dùng",
+        )
+
+    new_role = payload.role.strip().lower()
+
+    if target.role == "root_admin" and new_role != "root_admin":
+        root_admins = session.exec(select(User).where(User.role == "root_admin")).all()
+        if len(root_admins) <= 1:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Không thể hạ quyền Root Admin duy nhất của hệ thống",
+            )
+
+    target.role = new_role
+    session.add(target)
+    session.commit()
+    session.refresh(target)
+
+    ws_manager.update_user_role(target.id, new_role)
+    ws_manager.sync_send_to_user(
+        target.id,
+        "ROLE_CHANGED",
+        {"user_id": target.id, "username": target.username, "role": new_role},
+    )
+    ws_manager.sync_broadcast_to_roles(
+        ["admin", "root_admin"],
+        "ADMINS_UPDATED",
+        {"user_id": target.id, "role": new_role},
+    )
+
     return AdminUserOut(
         id=target.id,
         username=target.username,
@@ -1490,6 +2313,15 @@ def get_admin_tariff(
         electricity_tiers=config.get_tiers(),
         vat_rate=config.electricity_vat_rate,
         water_rate=config.water_unit_price,
+        water_vat_rate=config.water_vat_rate,
+        water_env_fee_rate=config.water_env_fee_rate,
+        fallback_tier_number=config.fallback_tier_number or 3,
+        fallback_flat_price=config.fallback_flat_price,
+        legal_basis_elec=config.legal_basis_elec or "QĐ 1279/QĐ-BCT & TT 60/2025/TT-BCT",
+        legal_basis_vat=config.legal_basis_vat or "Nghị quyết 204/2025/QH15",
+        compliance_decree=config.compliance_decree or "Nghị định 104/2022/NĐ-CP & NĐ 17/2022/NĐ-CP",
+        penalty_text=config.penalty_text or "20.000.000 đ đến 30.000.000 đ",
+        tier3_rule_note=config.tier3_rule_note or "Khoản 4 Điều 10 Thông tư 60/2025/TT-BCT",
     )
 
 
@@ -1547,8 +2379,39 @@ def update_admin_tariff(
     now_utc = datetime.now(timezone.utc)
     config.set_tiers(tiers_dict)
     config.electricity_vat_rate = float(vat_val)
-    config.electricity_tier3_price = float(tiers_in[2].unit_price)
     config.water_unit_price = float(payload.water_rate)
+
+    if payload.water_vat_rate is not None:
+        w_vat = payload.water_vat_rate
+        if w_vat > 1.0:
+            w_vat = w_vat / 100.0
+        config.water_vat_rate = float(w_vat)
+
+    if payload.water_env_fee_rate is not None:
+        w_env = payload.water_env_fee_rate
+        if w_env > 1.0:
+            w_env = w_env / 100.0
+        config.water_env_fee_rate = float(w_env)
+
+    if payload.fallback_tier_number is not None:
+        config.fallback_tier_number = int(payload.fallback_tier_number)
+    fb_idx = min(max((config.fallback_tier_number or 3) - 1, 0), 5)
+    config.electricity_tier3_price = float(tiers_in[fb_idx].unit_price)
+
+    if payload.fallback_flat_price is not None:
+        config.fallback_flat_price = float(payload.fallback_flat_price) if payload.fallback_flat_price > 0 else None
+
+    if payload.legal_basis_elec is not None:
+        config.legal_basis_elec = payload.legal_basis_elec.strip()
+    if payload.legal_basis_vat is not None:
+        config.legal_basis_vat = payload.legal_basis_vat.strip()
+    if payload.compliance_decree is not None:
+        config.compliance_decree = payload.compliance_decree.strip()
+    if payload.penalty_text is not None:
+        config.penalty_text = payload.penalty_text.strip()
+    if payload.tier3_rule_note is not None:
+        config.tier3_rule_note = payload.tier3_rule_note.strip()
+
     version = payload.tariff_version or f"CUSTOM-{now_utc.strftime('%Y-%m')}"
     config.tariff_version = version
     config.tariff_updated_at = now_utc
@@ -1558,6 +2421,15 @@ def update_admin_tariff(
         "electricity_tiers": tiers_dict,
         "vat_rate": config.electricity_vat_rate,
         "water_rate": config.water_unit_price,
+        "water_vat_rate": config.water_vat_rate,
+        "water_env_fee_rate": config.water_env_fee_rate,
+        "fallback_tier_number": config.fallback_tier_number,
+        "fallback_flat_price": config.fallback_flat_price,
+        "legal_basis_elec": config.legal_basis_elec,
+        "legal_basis_vat": config.legal_basis_vat,
+        "compliance_decree": config.compliance_decree,
+        "penalty_text": config.penalty_text,
+        "tier3_rule_note": config.tier3_rule_note,
         "updated_at": now_utc.isoformat(),
     }
     changelog = TariffChangeLog(
@@ -1573,12 +2445,29 @@ def update_admin_tariff(
     session.commit()
     session.refresh(config)
 
+    ws_manager.sync_broadcast_all(
+        "TARIFF_UPDATED",
+        {
+            "tariff_version": config.tariff_version,
+            "tariff_updated_at": config.tariff_updated_at.isoformat() if config.tariff_updated_at else None,
+        },
+    )
+
     return TariffOut(
         tariff_version=config.tariff_version,
         tariff_updated_at=config.tariff_updated_at,
         electricity_tiers=config.get_tiers(),
         vat_rate=config.electricity_vat_rate,
         water_rate=config.water_unit_price,
+        water_vat_rate=config.water_vat_rate,
+        water_env_fee_rate=config.water_env_fee_rate,
+        fallback_tier_number=config.fallback_tier_number or 3,
+        fallback_flat_price=config.fallback_flat_price,
+        legal_basis_elec=config.legal_basis_elec,
+        legal_basis_vat=config.legal_basis_vat,
+        compliance_decree=config.compliance_decree,
+        penalty_text=config.penalty_text,
+        tier3_rule_note=config.tier3_rule_note,
     )
 
 
@@ -1642,6 +2531,13 @@ def reset_tariff(
         config.water_vat_rate = float(tariff_def["water_vat_rate"])
     if "water_env_fee_rate" in tariff_def:
         config.water_env_fee_rate = float(tariff_def["water_env_fee_rate"])
+    config.fallback_tier_number = int(tariff_def.get("fallback_tier_number", 3))
+    config.fallback_flat_price = tariff_def.get("fallback_flat_price", None)
+    config.legal_basis_elec = tariff_def.get("legal_basis_elec", "QĐ 1279/QĐ-BCT & TT 60/2025/TT-BCT")
+    config.legal_basis_vat = tariff_def.get("legal_basis_vat", "Nghị quyết 204/2025/QH15")
+    config.compliance_decree = tariff_def.get("compliance_decree", "Nghị định 104/2022/NĐ-CP & NĐ 17/2022/NĐ-CP")
+    config.penalty_text = tariff_def.get("penalty_text", "20.000.000 đ đến 30.000.000 đ")
+    config.tier3_rule_note = tariff_def.get("tier3_rule_note", "Khoản 4 Điều 10 Thông tư 60/2025/TT-BCT")
 
     now_utc = datetime.now(timezone.utc)
     config.tariff_version = version
@@ -1652,6 +2548,15 @@ def reset_tariff(
         "electricity_tiers": tiers,
         "vat_rate": config.electricity_vat_rate,
         "water_rate": config.water_unit_price,
+        "water_vat_rate": config.water_vat_rate,
+        "water_env_fee_rate": config.water_env_fee_rate,
+        "fallback_tier_number": config.fallback_tier_number,
+        "fallback_flat_price": config.fallback_flat_price,
+        "legal_basis_elec": config.legal_basis_elec,
+        "legal_basis_vat": config.legal_basis_vat,
+        "compliance_decree": config.compliance_decree,
+        "penalty_text": config.penalty_text,
+        "tier3_rule_note": config.tier3_rule_note,
         "reset_to": version,
     }
     log_entry = TariffChangeLog(
@@ -1667,11 +2572,28 @@ def reset_tariff(
     session.commit()
     session.refresh(config)
 
+    ws_manager.sync_broadcast_all(
+        "TARIFF_UPDATED",
+        {
+            "tariff_version": config.tariff_version,
+            "tariff_updated_at": config.tariff_updated_at.isoformat() if config.tariff_updated_at else None,
+        },
+    )
+
     return TariffOut(
         tariff_version=config.tariff_version,
         tariff_updated_at=config.tariff_updated_at,
         electricity_tiers=config.get_tiers(),
         vat_rate=config.electricity_vat_rate,
         water_rate=config.water_unit_price,
+        water_vat_rate=config.water_vat_rate,
+        water_env_fee_rate=config.water_env_fee_rate,
+        fallback_tier_number=config.fallback_tier_number or 3,
+        fallback_flat_price=config.fallback_flat_price,
+        legal_basis_elec=config.legal_basis_elec,
+        legal_basis_vat=config.legal_basis_vat,
+        compliance_decree=config.compliance_decree,
+        penalty_text=config.penalty_text,
+        tier3_rule_note=config.tier3_rule_note,
     )
 

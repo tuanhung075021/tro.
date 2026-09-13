@@ -28,6 +28,13 @@ STATUTORY_TARIFF_HISTORY: Dict[str, Dict[str, Any]] = {
         "water_pricing_type": "PER_M3",
         "water_vat_rate": 0.05,
         "water_env_fee_rate": 0.10,
+        "fallback_tier_number": 3,
+        "fallback_flat_price": None,
+        "legal_basis_elec": "QĐ 1279/QĐ-BCT & TT 60/2025/TT-BCT",
+        "legal_basis_vat": "Nghị quyết 204/2025/QH15",
+        "compliance_decree": "Nghị định 104/2022/NĐ-CP & NĐ 17/2022/NĐ-CP",
+        "penalty_text": "20.000.000 đ đến 30.000.000 đ",
+        "tier3_rule_note": "Khoản 4 Điều 10 Thông tư 60/2025/TT-BCT",
     }
 }
 
